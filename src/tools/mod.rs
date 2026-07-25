@@ -183,10 +183,12 @@ pub fn is_mutation_tool(name: &str) -> bool {
     mutation_tool_names().contains(&name)
 }
 
-/// Built-in tools that only read state and have no side effects on the
-/// workspace, so the agent loop can safely run several of them concurrently
-/// within a single step. `shell` and `run_tests` are excluded (they can mutate
-/// or run arbitrary commands), as are MCP tools (unknown side effects).
+/// Built-in tools that do not mutate the workspace, so the agent loop can
+/// safely run several of them concurrently within a single step.
+///
+/// Includes network-only `web_fetch` (no workspace writes). Excludes `shell`
+/// and `run_tests` (arbitrary commands), mutating file tools, and MCP tools
+/// (unknown side effects).
 pub fn read_only_tool_names() -> &'static [&'static str] {
     &[
         "file_read",
@@ -195,6 +197,7 @@ pub fn read_only_tool_names() -> &'static [&'static str] {
         "glob",
         "repo_search",
         "ship_status",
+        "web_fetch",
     ]
 }
 
@@ -404,7 +407,8 @@ mod tests {
         assert!(!is_read_only_tool("file_edit"));
         // MCP and unknown tools are not in the safe set.
         assert!(!is_read_only_tool("mcp__fs__read_file"));
-        assert!(!is_read_only_tool("web_fetch"));
+        // Network fetch does not touch the workspace — safe to parallelize.
+        assert!(is_read_only_tool("web_fetch"));
     }
 
     #[test]
