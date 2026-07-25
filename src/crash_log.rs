@@ -59,7 +59,7 @@ fn write_crash_report(
 
     let mut body = String::new();
     body.push_str(&format!(
-        "small-harness {} crash report\n",
+        "albatross {} crash report\n",
         env!("CARGO_PKG_VERSION")
     ));
     body.push_str(&format!("timestamp: {}\n", Utc::now().to_rfc3339()));
@@ -100,7 +100,7 @@ fn write_crash_report(
     body.push_str("\n--- env (sensitive values redacted) ---\n");
     let mut env_keys: Vec<_> = std::env::vars()
         .filter(|(k, _)| {
-            k.starts_with("SMALL_HARNESS_")
+            k.starts_with("ALBATROSS_")
                 || k.starts_with("AGENT_")
                 || k.starts_with("BACKEND")
                 || k.starts_with("APPROVAL_")
@@ -131,7 +131,7 @@ fn write_crash_report(
     // Best-effort post-print so the user knows where to look. The default
     // hook already printed the panic message; we just add the file path.
     eprintln!(
-        "\nsmall-harness wrote a crash log to {} — attach it when filing an issue.",
+        "\nalbatross wrote a crash log to {} — attach it when filing an issue.",
         path.display()
     );
 
@@ -153,7 +153,7 @@ mod tests {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OPENAI_API_KEY", "sk-not-real-zzzzzzzz");
-        std::env::set_var("SMALL_HARNESS_TEST_FLAG", "visible-value");
+        std::env::set_var("ALBATROSS_TEST_FLAG", "visible-value");
 
         let dir_path = dir.path().to_path_buf();
         let prev = std::panic::take_hook();
@@ -174,11 +174,11 @@ mod tests {
         let body = std::fs::read_to_string(&logs[0]).unwrap();
         assert!(body.contains("intentional test panic"));
         assert!(body.contains("OPENAI_API_KEY=(redacted)"));
-        assert!(body.contains("SMALL_HARNESS_TEST_FLAG=visible-value"));
+        assert!(body.contains("ALBATROSS_TEST_FLAG=visible-value"));
         assert!(!body.contains("sk-not-real-zzzzzzzz"));
 
         std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("SMALL_HARNESS_TEST_FLAG");
+        std::env::remove_var("ALBATROSS_TEST_FLAG");
     }
 
     #[test]

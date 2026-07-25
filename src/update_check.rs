@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/GetSmallAI/SmallHarness/releases/latest";
-const USER_AGENT: &str = concat!("small-harness/", env!("CARGO_PKG_VERSION"));
+const RELEASES_URL: &str = "https://api.github.com/repos/GetSmallAI/Albatross/releases/latest";
+const USER_AGENT: &str = concat!("albatross/", env!("CARGO_PKG_VERSION"));
 const CACHE_TTL_HOURS: i64 = 24;
 const HTTP_TIMEOUT_SECS: u64 = 4;
-const OPT_OUT_ENV: &str = "SMALL_HARNESS_NO_UPDATE_CHECK";
+const OPT_OUT_ENV: &str = "ALBATROSS_NO_UPDATE_CHECK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCache {
@@ -28,8 +28,8 @@ struct GhRelease {
     tag_name: String,
 }
 
-/// `$XDG_CACHE_HOME/small-harness/update-check.json`, falling back to
-/// `~/.cache/small-harness/update-check.json`. Returns None on a host with
+/// `$XDG_CACHE_HOME/albatross/update-check.json`, falling back to
+/// `~/.cache/albatross/update-check.json`. Returns None on a host with
 /// no usable home — we just skip the update check entirely there.
 pub fn cache_path() -> Option<PathBuf> {
     let base = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
@@ -39,7 +39,7 @@ pub fn cache_path() -> Option<PathBuf> {
     } else {
         return None;
     };
-    Some(base.join("small-harness").join("update-check.json"))
+    Some(base.join("albatross").join("update-check.json"))
 }
 
 pub fn opted_out() -> bool {
@@ -78,7 +78,7 @@ pub fn pending_notice(current: &str) -> Option<String> {
     let cache = read_cache(&path)?;
     if version_is_newer(&cache.latest_version, current) {
         Some(format!(
-            "Update available: {} → {} (https://github.com/GetSmallAI/SmallHarness/releases/latest)",
+            "Update available: {} → {} (https://github.com/GetSmallAI/Albatross/releases/latest)",
             current, cache.latest_version
         ))
     } else {

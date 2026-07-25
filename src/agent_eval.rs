@@ -522,7 +522,7 @@ pub async fn run_agent_eval(
 }
 
 pub fn render_agent_eval_markdown(results: &[AgentEvalRunResult]) -> String {
-    let mut md = String::from("# Small Harness Agent Eval\n\n");
+    let mut md = String::from("# Albatross Agent Eval\n\n");
     md.push_str("| model | fixture | passed | steps | latency ms | tools_used |\n");
     md.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for result in results {

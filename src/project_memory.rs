@@ -665,13 +665,13 @@ pub const PROJECT_CONTEXT_HEADER: &str = "Local project memory context:";
 
 fn append_project_prompt(out: &mut String, workspace_root: &str) {
     if let Some(project_prompt) = load_project_prompt(workspace_root) {
-        out.push_str("\n\nProject-specific guidance (.small-harness/prompt.md):\n");
+        out.push_str("\n\nProject-specific guidance (.albatross/prompt.md):\n");
         out.push_str(&project_prompt);
     }
 }
 
 /// System prompt that stays byte-identical across turns within a session:
-/// base prompt plus the static `.small-harness/prompt.md` guidance.
+/// base prompt plus the static `.albatross/prompt.md` guidance.
 ///
 /// It deliberately omits the prompt-focused repo map ([`maybe_project_context`]),
 /// which is re-ranked against every user message and so changes each turn.
@@ -702,14 +702,14 @@ pub fn render_system_prompt_with_memory(
     out
 }
 
-/// Read `.small-harness/prompt.md` from the workspace root, if present.
+/// Read `.albatross/prompt.md` from the workspace root, if present.
 ///
 /// Truncated at PROJECT_PROMPT_MAX_BYTES so a stray multi-megabyte file
 /// can't blow up every turn's prompt budget. Truncation is byte-accurate
 /// but rolled back to a char boundary so we don't slice mid-UTF-8.
 fn load_project_prompt(workspace_root: &str) -> Option<String> {
     let path = std::path::Path::new(workspace_root)
-        .join(".small-harness")
+        .join(".albatross")
         .join("prompt.md");
     let raw = std::fs::read_to_string(&path).ok()?;
     let trimmed = raw.trim();
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn project_prompt_loads_when_present() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join(".small-harness");
+        let nested = dir.path().join(".albatross");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("prompt.md"), "Always use snake_case.\n").unwrap();
         let loaded = super::load_project_prompt(dir.path().to_str().unwrap()).unwrap();
@@ -1534,7 +1534,7 @@ mod tests {
     #[test]
     fn project_prompt_truncates_when_over_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join(".small-harness");
+        let nested = dir.path().join(".albatross");
         std::fs::create_dir_all(&nested).unwrap();
         let huge = "x".repeat(super::PROJECT_PROMPT_MAX_BYTES * 2);
         std::fs::write(nested.join("prompt.md"), &huge).unwrap();
@@ -1546,7 +1546,7 @@ mod tests {
     #[test]
     fn empty_project_prompt_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join(".small-harness");
+        let nested = dir.path().join(".albatross");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("prompt.md"), "   \n\n  ").unwrap();
         assert!(super::load_project_prompt(dir.path().to_str().unwrap()).is_none());

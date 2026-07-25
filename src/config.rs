@@ -11,6 +11,30 @@ use crate::model_system::ModelSystemConfig;
 /// `/backend --default` / `/model --default`.
 pub const AGENT_CONFIG_PATH: &str = "agent.config.json";
 
+/// Per-project scratch directory holding `spec.md`, `plan.json`, `rubric.md`,
+/// `continue.md`, and `auto-report.md`. `LEGACY_` is the pre-Albatross name,
+/// kept only so an existing checkout can be migrated once.
+pub const WORKSPACE_SCRATCH_DIR: &str = ".albatross";
+const LEGACY_WORKSPACE_SCRATCH_DIR: &str = ".small-harness";
+
+/// Move a pre-rename `.small-harness/` scratch directory to `.albatross/` once.
+/// Most of its contents regenerate, but `rubric.md` and `spec.md` are usually
+/// hand-written, so ignoring the old directory would quietly lose real work.
+///
+/// Best-effort and idempotent: skipped when the current directory already
+/// exists, so a stale legacy copy can never overwrite live files. Returns the
+/// moved `(from, to)` pair when a migration happened.
+pub fn migrate_legacy_workspace_dir(workspace_root: &str) -> Option<(PathBuf, PathBuf)> {
+    let base = Path::new(workspace_root);
+    let legacy = base.join(LEGACY_WORKSPACE_SCRATCH_DIR);
+    let current = base.join(WORKSPACE_SCRATCH_DIR);
+    if current.exists() || !legacy.is_dir() {
+        return None;
+    }
+    std::fs::rename(&legacy, &current).ok()?;
+    Some((legacy, current))
+}
+
 pub const ALL_TOOL_NAMES: &[&str] = &[
     "apply_patch",
     "batch_edit",
@@ -381,7 +405,7 @@ pub struct RubricConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Override path to the rubric markdown; defaults to
-    /// `<workspace>/.small-harness/rubric.md`.
+    /// `<workspace>/.albatross/rubric.md`.
     #[serde(rename = "rubricPath", default)]
     pub rubric_path: Option<String>,
     /// Pass threshold on the 0-10 weighted scale.
@@ -1345,7 +1369,7 @@ pub fn load_config() -> AgentConfig {
             config.tool_selection = selection;
         }
     }
-    if let Some(s) = layered_env(&dotenv, "SMALL_HARNESS_MODE") {
+    if let Some(s) = layered_env(&dotenv, "ALBATROSS_MODE") {
         if let Some(mode) = OperatorMode::parse(&s) {
             config.apply_operator_mode(mode);
         }
@@ -1403,6 +1427,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_migration_preserves_hand_written_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let legacy = dir.path().join(".small-harness");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("rubric.md"), "## Clarity (weight: 2)\n").unwrap();
+
+        let moved = migrate_legacy_workspace_dir(&root).expect("migration should run");
+        assert_eq!(moved.1, dir.path().join(".albatross"));
+        assert!(!legacy.exists());
+        let rubric = std::fs::read_to_string(moved.1.join("rubric.md")).unwrap();
+        assert!(rubric.contains("Clarity"));
+    }
+
+    #[test]
+    fn workspace_migration_never_clobbers_a_current_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        std::fs::create_dir_all(dir.path().join(".small-harness")).unwrap();
+        let current = dir.path().join(".albatross");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("rubric.md"), "current\n").unwrap();
+
+        assert!(migrate_legacy_workspace_dir(&root).is_none());
+        let rubric = std::fs::read_to_string(current.join("rubric.md")).unwrap();
+        assert_eq!(rubric, "current\n");
+    }
+
+    #[test]
+    fn workspace_migration_is_a_no_op_without_a_legacy_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        assert!(migrate_legacy_workspace_dir(&root).is_none());
+        assert!(!dir.path().join(".albatross").exists());
+    }
+
+    #[test]
     fn parses_dotenv_quotes_and_comments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
@@ -1421,13 +1482,13 @@ mod tests {
     #[test]
     fn process_env_wins_over_dotenv_values() {
         let mut dotenv = BTreeMap::new();
-        dotenv.insert("SMALL_HARNESS_TEST_LAYER".into(), "dotenv".into());
-        std::env::set_var("SMALL_HARNESS_TEST_LAYER", "process");
+        dotenv.insert("ALBATROSS_TEST_LAYER".into(), "dotenv".into());
+        std::env::set_var("ALBATROSS_TEST_LAYER", "process");
         assert_eq!(
-            layered_env(&dotenv, "SMALL_HARNESS_TEST_LAYER").as_deref(),
+            layered_env(&dotenv, "ALBATROSS_TEST_LAYER").as_deref(),
             Some("process")
         );
-        std::env::remove_var("SMALL_HARNESS_TEST_LAYER");
+        std::env::remove_var("ALBATROSS_TEST_LAYER");
     }
 
     #[test]

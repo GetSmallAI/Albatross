@@ -197,7 +197,7 @@ pub fn render_report(report: &FableUsageReport, scorecard_enabled: bool) -> Stri
         ));
     }
     out.push_str(&format!(
-        "  {DIM}scope{RESET}           Small Harness tracked turns only; external Claude app usage is not visible here.\n"
+        "  {DIM}scope{RESET}           Albatross tracked turns only; external Claude app usage is not visible here.\n"
     ));
     out
 }

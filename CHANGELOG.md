@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed from Small Harness to Albatross.** The binary is now `albatross`,
+  installed with `brew install getsmallai/tap/albatross`. The config directory
+  moves from `~/.config/small-harness` to `~/.config/albatross`, and per-project
+  scratch from `<workspace>/.small-harness/` to `<workspace>/.albatross/`.
+  Hook environment variables are now `ALBATROSS_*`.
+
+  Migration is automatic. An existing `~/.config/small-harness` directory is
+  moved on first run, so stored OAuth logins, API keys, and scorecard history
+  carry over with no re-login, and a `<workspace>/.small-harness/` directory is
+  moved when that project is next opened, preserving a hand-written `rubric.md`
+  or `spec.md`. Neither move overwrites an existing Albatross directory. Hook
+  scripts reading the old `SMALL_HARNESS_*` variables keep working — both
+  prefixes are exported for this release, and the aliases will be removed in a
+  later one.
+
+  One thing to do by hand: reinstall rather than upgrade if you installed the
+  old Homebrew formula, since Homebrew does not follow a formula rename. The
+  Codex `originator` request header intentionally keeps its previous value.
+
 ## [1.2.7] - 2026-07-21
 
 ### Changed

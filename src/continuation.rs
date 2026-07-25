@@ -1,7 +1,7 @@
 //! Context reset with a structured handoff artifact (`/reset`).
 //!
 //! `/reset` drafts a continuation artifact from the current conversation, writes
-//! it to `.small-harness/continue.md`, then clears the live transcript and seeds
+//! it to `.albatross/continue.md`, then clears the live transcript and seeds
 //! a fresh session whose first message *is* that artifact. This is the article's
 //! "reset over compaction": a clean context window plus an explicit handoff that
 //! carries enough state to continue — rather than an in-place summary that
@@ -26,10 +26,10 @@ const CONTINUATION_SECTIONS: &[&str] = &[
     "Key Files",
 ];
 
-/// Where `/reset` writes by default: `<workspace>/.small-harness/continue.md`.
+/// Where `/reset` writes by default: `<workspace>/.albatross/continue.md`.
 pub fn default_continuation_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root)
-        .join(".small-harness")
+        .join(".albatross")
         .join("continue.md")
 }
 
@@ -172,9 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn default_continuation_path_is_under_small_harness() {
+    fn default_continuation_path_is_under_albatross() {
         let path = default_continuation_path("/tmp/project");
-        assert!(path.ends_with(".small-harness/continue.md"));
+        assert!(path.ends_with(".albatross/continue.md"));
         assert!(path.starts_with("/tmp/project"));
     }
 

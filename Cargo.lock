@@ -12,6 +12,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "albatross"
+version = "1.2.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "crossterm",
+ "futures-util",
+ "getrandom 0.2.17",
+ "globset",
+ "ignore",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1171,29 +1194,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "small-harness"
-version = "1.2.7"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "crossterm",
- "futures-util",
- "getrandom 0.2.17",
- "globset",
- "ignore",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "walkdir",
-]
 
 [[package]]
 name = "smallvec"

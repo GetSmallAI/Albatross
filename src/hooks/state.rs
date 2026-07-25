@@ -25,7 +25,7 @@ pub fn hook_state_file_path_from_env(xdg: Option<&str>, home: Option<&str>) -> O
     } else {
         PathBuf::from(home?).join(".config")
     };
-    Some(base.join("small-harness").join("hooks-state.json"))
+    Some(base.join("albatross").join("hooks-state.json"))
 }
 
 pub fn load_hook_state_file_from(path: &Path) -> Result<HookStateFile> {

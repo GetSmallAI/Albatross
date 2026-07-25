@@ -194,7 +194,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         // qwen2.5:7b (base) is used rather than qwen2.5-coder:7b because the
         // coder variant does not use Ollama's structured tool_calls API —
         // it emits tool invocations as raw JSON text in the content field,
-        // which SmallHarness cannot execute. The base model uses the same
+        // which Albatross cannot execute. The base model uses the same
         // <tool_call> template that Ollama translates to structured tool_calls.
         BackendName::Ollama => "qwen2.5:7b",
         BackendName::LmStudio => "qwen2.5-coder-7b-instruct",
@@ -327,7 +327,7 @@ mod tests {
     fn defaults_ollama_to_base_qwen_not_coder_variant() {
         // qwen2.5:7b (base) must be the default, not qwen2.5-coder:7b.
         // The coder variant emits tool calls as raw JSON text rather than
-        // via Ollama's structured tool_calls API, so SmallHarness cannot
+        // via Ollama's structured tool_calls API, so Albatross cannot
         // execute them in interactive or one-shot mode.
         let model = default_model(&descriptor(BackendName::Ollama), None);
         assert_eq!(model, "qwen2.5:7b");

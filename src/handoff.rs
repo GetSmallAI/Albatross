@@ -254,7 +254,7 @@ fn run_git(workspace_root: &str, args: &[&str]) -> Result<String> {
 
 pub fn handoff_system_prompt() -> String {
     [
-        "You draft concise release handoff copy for Small Harness.",
+        "You draft concise release handoff copy for Albatross.",
         "Use only the supplied git context. Do not invent tests, issue numbers, or files.",
         "Return Markdown with exactly these top-level sections:",
         "## Commit Message",
@@ -273,7 +273,7 @@ pub fn render_handoff_prompt(
     freshness: Option<&ProjectIndexFreshness>,
 ) -> String {
     let mut out = String::new();
-    out.push_str("Draft release handoff copy for this Small Harness change.\n\n");
+    out.push_str("Draft release handoff copy for this Albatross change.\n\n");
     out.push_str("Rules:\n");
     out.push_str("- Keep the commit message conventional and one line.\n");
     out.push_str("- Changelog bullets should be user-facing and concise.\n");
@@ -337,7 +337,7 @@ pub fn render_fallback_markdown(
     error: Option<&str>,
 ) -> String {
     let mut out = String::new();
-    out.push_str("# Small Harness Handoff\n\n");
+    out.push_str("# Albatross Handoff\n\n");
     out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
     if let Some(error) = error {
         out.push_str(&format!("Draft status: model draft failed: {error}\n\n"));
@@ -361,7 +361,7 @@ pub fn render_fallback_markdown(
         out.push_str("- Diff context was truncated before drafting.\n");
     }
     out.push_str("\n## X Post\n\n");
-    out.push_str("Small Harness handoff draft:\n\n");
+    out.push_str("Albatross handoff draft:\n\n");
     out.push_str(&format!("- {}\n", context.basis.label()));
     out.push_str(&format!("- Branch `{}`\n", snapshot.branch_label()));
     out.push_str("- Shipcheck facts included for release review\n");

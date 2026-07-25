@@ -118,7 +118,7 @@ impl McpClient {
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
                     "clientInfo": {
-                        "name": "small-harness",
+                        "name": "albatross",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                 }),

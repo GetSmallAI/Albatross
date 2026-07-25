@@ -1,4 +1,4 @@
-<h1 align="center">Small Harness</h1>
+<h1 align="center">Albatross</h1>
 
 <p align="center">
   <strong>A small, terminal-first coding harness. Bring your own model, your own key, or your own MCP server.</strong>
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/GetSmallAI/Albatross/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/Albatross/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-1.2.7-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
@@ -49,7 +49,7 @@ few that aren't usual:
   production review and security review, then switches the active coding model.
 - **Routed plans.** `/plan route <goal>` asks a configured planner model to
   break work into a low/medium/high task graph, saves it to
-  `.small-harness/plan.json`, and `/plan execute` runs ready tasks through the
+  `.albatross/plan.json`, and `/plan execute` runs ready tasks through the
   configured coder tiers.
 - **Real undo.** `/undo` reverts the last agent turn's file mutations,
   including files the agent created or files that weren't tracked when the
@@ -67,7 +67,7 @@ few that aren't usual:
 - **MCP-native.** Drop servers into `mcpServers` in your config; their tools
   show up as `mcp__<server>__<tool>` to the model on next launch.
 - **`/auth` instead of `.env`.** Paste API keys once into a `0600` file
-  under `~/.config/small-harness/`. Env vars still win when set.
+  under `~/.config/albatross/`. Env vars still win when set.
 - **Approval gates you can live with.** Every mutating call shows you the
   diff first, with `allow once / allow session / always allow` caching.
 
@@ -78,15 +78,15 @@ few that aren't usual:
 **Homebrew (macOS):**
 
 ```bash
-brew install getsmallai/tap/small-harness
+brew install getsmallai/tap/albatross
 ```
 
 **From source** (Rust 1.75+):
 
 ```bash
-git clone https://github.com/GetSmallAI/SmallHarness.git
-cd SmallHarness
-cargo build --release    # binary at target/release/small-harness
+git clone https://github.com/GetSmallAI/Albatross.git
+cd Albatross
+cargo build --release    # binary at target/release/albatross
 ```
 
 ---
@@ -96,16 +96,16 @@ cargo build --release    # binary at target/release/small-harness
 Launch the interactive session:
 
 ```bash
-small-harness
+albatross
 ```
 
 > From a source checkout without installing, use `cargo run --release` instead.
 
 The first launch runs a short setup wizard (it writes `agent.config.json` —
-backend, model, approval policy). Skip it with `SMALL_HARNESS_NO_WIZARD=true`.
+backend, model, approval policy). Skip it with `ALBATROSS_NO_WIZARD=true`.
 Every launch after that opens straight into a session.
 
-Small Harness talks to **one backend at a time** — pick the path that fits.
+Albatross talks to **one backend at a time** — pick the path that fits.
 
 ### Path A — Cloud API key
 
@@ -123,12 +123,12 @@ Small Harness talks to **one backend at a time** — pick the path that fits.
    `/backend openai`):
 
    ```bash
-   small-harness
+   albatross
    ```
 
 Prefer not to put the key in your environment? Launch first, then run
 `/auth set openai` inside the app and paste it once — it's stored in a `0600`
-file under `~/.config/small-harness/`. Cost per turn and per session shows
+file under `~/.config/albatross/`. Cost per turn and per session shows
 live on the status line.
 
 ### Path A2 — ChatGPT / Codex subscription login
@@ -177,7 +177,7 @@ as pi — it does not scrape xAI's full `/models` list.
 2. Launch — Ollama is the default backend, so there's nothing else to set:
 
    ```bash
-   small-harness
+   albatross
    ```
 
 LM Studio, MLX, and llama.cpp work the same way — see [Backends](#backends)
@@ -239,7 +239,7 @@ A handful of moves worth knowing right away:
 - `/play fix-failing-test` runs a bundled demo in an isolated sandbox so you
   can try a real agent loop without touching your repo.
 - `Ctrl-J` for newline; `Enter` submits.
-- `small-harness --continue` resumes the most recent session in the cwd.
+- `albatross --continue` resumes the most recent session in the cwd.
 
 ---
 
@@ -349,9 +349,9 @@ this exact call`. The session cache resets on `/new`.
 **Operator modes and workflow**
 ```
 /mode explore|edit|ship|review   switch operator preset
-/plan <intent>                   expand a short intent into a spec (.small-harness/spec.md)
+/plan <intent>                   expand a short intent into a spec (.albatross/spec.md)
 /plan route <intent>             create a low/medium/high routed execution plan
-/plan status                     show .small-harness/plan.json task status
+/plan status                     show .albatross/plan.json task status
 /plan execute [--yolo] [--max N] run ready routed-plan tasks
 /plan validate                   check the spec's Done Criteria against the working diff
 /shipcheck                       summarize git + test readiness
@@ -426,7 +426,7 @@ Run `/help` in the harness for the full list with descriptions.
 ### Credentials with `/auth` and `/login`
 
 API-key cloud backends authenticate with API keys. Paste them once and Small
-Harness stores them at `~/.config/small-harness/auth.json` (mode `0600`).
+Harness stores them at `~/.config/albatross/auth.json` (mode `0600`).
 Environment variables always win at lookup time, so CI and scripted users see
 no change in behavior.
 
@@ -471,7 +471,7 @@ cost, every turn prints its own cost plus the running session total:
 
 Switch to Ollama mid-session and the line shows `$0.00 this turn` but keeps
 the running total honest. OpenRouter returns `usage.cost` for many requests,
-including dynamic routers like Fusion; Small Harness uses that reported value
+including dynamic routers like Fusion; Albatross uses that reported value
 when present. If a cloud model does not expose cost, the turn shows `$?` and
 prefixes the session total with `≥` to signal it is a lower bound, not a
 fiction.
@@ -501,7 +501,7 @@ append a compact weekly tracker to the status footer.
 
 By default, Fable models are detected by model IDs containing `fable`, and the
 cap share is `0.5` (50%). Add this to `agent.config.json` when you know the
-weekly Claude-plan token budget you want Small Harness to monitor:
+weekly Claude-plan token budget you want Albatross to monitor:
 
 ```json
 {
@@ -513,12 +513,12 @@ weekly Claude-plan token budget you want Small Harness to monitor:
 }
 ```
 
-The tracker only sees Small Harness turns recorded in the local ledger. It
+The tracker only sees Albatross turns recorded in the local ledger. It
 cannot see usage from the Claude app or other clients.
 
 ### Quality PR scorecard
 
-`/scorecard` tracks whether Small Harness-assisted PRs are shipping with good
+`/scorecard` tracks whether Albatross-assisted PRs are shipping with good
 **local** quality evidence at close time — not post-merge CI on GitHub. Each
 successful interactive turn still records input + output tokens under the current
 repo and branch, but tokens are context rather than the score. `/ship pr` closes
@@ -552,7 +552,7 @@ A PR counts as quality-shipped when its local score meets `scorecard.qualityThre
 (default 80), tests passed, readiness was not blocked, and either the PR
 creation command succeeded or a PR URL was captured with `--url`. Configure via
 `scorecard` in `agent.config.json` or disable with `scorecard.enabled: false`.
-Data is stored locally under the Small Harness data directory; `/scorecard path`
+Data is stored locally under the Albatross data directory; `/scorecard path`
 prints the exact JSONL file. Use `/scorecard doctor` if the ledger looks wrong;
 malformed JSONL lines are skipped rather than allowed to break the scorecard, and
 `/scorecard export [path]` copies the raw ledger before manual repair. `/scorecard
@@ -569,7 +569,7 @@ global quality PR scorecard.
 
 `/plan <intent>` expands a one- or two-sentence intent into an ambitious spec
 — goal, user outcomes, scope, done criteria, open questions — and writes it to
-`.small-harness/spec.md`. It deliberately stays at the level of *what* and
+`.albatross/spec.md`. It deliberately stays at the level of *what* and
 *why*, not implementation, so an early spec doesn't lock in the wrong details.
 `/plan show` prints the saved spec; `--export <path>` writes elsewhere.
 
@@ -577,7 +577,7 @@ global quality PR scorecard.
 `modelSystem.planner` when configured (falling back to selector, high/medium/low
 orchestrator, then the active model), asks for a JSON task graph, assigns each
 node to `modelSystem.coders.low|medium|high`, and writes
-`.small-harness/plan.json`. Use `--planner high`, `--planner selector`, or
+`.albatross/plan.json`. Use `--planner high`, `--planner selector`, or
 `--planner backend:model-id` to override the planner for one route:
 
 ```text
@@ -591,7 +591,7 @@ per task and saving status after each node. `--yolo` auto-approves tools for
 unattended local execution.
 
 To mix subscription and API usage, put subscription-backed models on tiers where
-Small Harness has a real login backend, such as `openai-codex` after
+Albatross has a real login backend, such as `openai-codex` after
 `/login openai-codex` or `grok` after `/login grok`, and keep usage-billed
 automation on `openai`, `openrouter`, or local backends. For Claude/Fable subscriptions, track usage
 with `/fable`; direct unattended execution should stay on an API-compatible
@@ -614,7 +614,7 @@ the model, computes the weighted total and pass/fail, so a critic that
 over-rates can't wave weak work through.
 
 The rubric defaults to quality / originality / craft / functionality and
-penalizes generic "AI slop"; override it with a `.small-harness/rubric.md`
+penalizes generic "AI slop"; override it with a `.albatross/rubric.md`
 using `## Name (weight: N)` sections. Set `iterate.evaluatorModel` to grade
 with a *different* model than the generator — the cleanest version of the
 generator/evaluator split. Turn on `rubric.liveVerify` and the critic runs your
@@ -629,7 +629,7 @@ Workspace context is never sent to a cloud backend for grading unless you set
 
 On a long task, `/reset` writes a structured handoff artifact — done, in
 progress, key decisions, next steps, key files — to
-`.small-harness/continue.md`, then starts a **fresh session seeded with only
+`.albatross/continue.md`, then starts a **fresh session seeded with only
 that artifact**. Unlike `/compact`, which summarizes in place, this is a clean
 context window carrying just what's needed to continue, which holds coherence
 better over long runs. `/reset --dry-run` writes the artifact without clearing;
@@ -650,13 +650,13 @@ feedback carry across each reset.
 ```
 
 Give it an inline goal, or `--spec` to read the goal and **Done Criteria** from
-`.small-harness/spec.md` (written by `/plan`). With criteria present, each round
+`.albatross/spec.md` (written by `/plan`). With criteria present, each round
 also checks them against the working-tree diff, and "done" means the rubric
 threshold *and* every criterion is met — a lightweight spec-validator folded in.
 
 | Flag | Meaning |
 |------|---------|
-| `--spec` | Read goal + Done Criteria from `.small-harness/spec.md` |
+| `--spec` | Read goal + Done Criteria from `.albatross/spec.md` |
 | `--max N` | Round ceiling (default 12, hard cap 40) |
 | `--threshold X` | Per-round rubric pass bar (default `rubric.passThreshold`) |
 | `--budget $` | Stop after this much **generator** spend |
@@ -669,7 +669,7 @@ The run is **always finitely bounded** (a `--max` ceiling applies even with no
 other flag) and stops early on a stall — no score gain and no diff change for
 three rounds. However it ends — goal met, budget/deadline/rounds exhausted,
 stall, error, or Ctrl-C — it leaves a morning report at
-`.small-harness/auto-report.md` with the verdict, per-round scores, the Done
+`.albatross/auto-report.md` with the verdict, per-round scores, the Done
 Criteria checklist, cost, elapsed time, and reset count. Same guards as
 `/iterate`: it runs on a local backend unless you pass `--cloud`, needs
 `rubric.enabled`, and won't run inside a `/play` session. Defaults live in the
@@ -678,7 +678,7 @@ keep `checkpoints.enabled` on for an unattended run.
 
 ### Project-specific system prompt
 
-Drop a markdown file at `.small-harness/prompt.md` in your repo and Small
+Drop a markdown file at `.albatross/prompt.md` in your repo and Small
 Harness prepends it to the system prompt every turn. Use it for project
 conventions ("snake_case everywhere", "ship via `make release`", "never
 edit `vendor/`"). Auto-truncated at 8 KB.
@@ -699,7 +699,7 @@ Add an `mcpServers` block to `agent.config.json`:
 }
 ```
 
-Small Harness spawns each server at startup, lists its tools, and exposes
+Albatross spawns each server at startup, lists its tools, and exposes
 them through the same approval-gated tool layer with names like
 `mcp__fs__read_file`. JSON-RPC over stdio; no extra dependencies.
 
@@ -769,9 +769,9 @@ the actual prompt/tool data; do not log it unless your hook performs its own
 redaction. Hook child processes start with a cleared environment and receive the
 minimal inherited shell environment (`PATH`, `HOME` or Windows home/system vars),
 explicit parent process variables listed in `envVars`, literal values from
-`env`, plus `SMALL_HARNESS_HOOK_EVENT`, `SMALL_HARNESS_SESSION_ID`,
-`SMALL_HARNESS_TURN_ID`, `SMALL_HARNESS_TRANSCRIPT_PATH`, and
-`SMALL_HARNESS_EVENTS_PATH`. Parent LLM provider credentials are not passed
+`env`, plus `ALBATROSS_HOOK_EVENT`, `ALBATROSS_SESSION_ID`,
+`ALBATROSS_TURN_ID`, `ALBATROSS_TRANSCRIPT_PATH`, and
+`ALBATROSS_EVENTS_PATH`. Parent LLM provider credentials are not passed
 through unless a hook explicitly names them in `envVars`.
 
 Matchers are Codex-style: absent, empty, or `*` matches all; exact `|`
@@ -802,8 +802,8 @@ safety. Manage trust with:
 /hooks enable <key>            enable one hook
 ```
 
-Trust is stored in `$XDG_CONFIG_HOME/small-harness/hooks-state.json`, falling
-back to `~/.config/small-harness/hooks-state.json`. Trusted hook successes are
+Trust is stored in `$XDG_CONFIG_HOME/albatross/hooks-state.json`, falling
+back to `~/.config/albatross/hooks-state.json`. Trusted hook successes are
 quiet in the normal TUI; warnings, blocks, denies, stops, and feedback are
 shown. The event log records hook start/end/decision records with redacted,
 bounded stdout/stderr previews.
@@ -812,13 +812,13 @@ Launchers can inject ephemeral managed launch hooks without changing user
 config:
 
 ```bash
-SMALL_HARNESS_MANAGED_HOOKS_FILE="$TMPDIR/agent-status-hooks.json" small-harness
+ALBATROSS_MANAGED_HOOKS_FILE="$TMPDIR/agent-status-hooks.json" albatross
 ```
 
-`SMALL_HARNESS_MANAGED_HOOKS_JSON` accepts the same document inline for small
+`ALBATROSS_MANAGED_HOOKS_JSON` accepts the same document inline for small
 launchers. Managed launch hooks are not cryptographic signatures or Codex
 enterprise-managed hooks; they are process-local launcher-trusted commands for
-wrappers that own the process invocation. Small Harness intentionally reads
+wrappers that own the process invocation. Albatross intentionally reads
 these only from the real process environment, not repo `.env` files. This lets
 integrations observe status without mutating the user's config.
 
@@ -850,7 +850,7 @@ Use `envVars` when a managed hook command needs launcher state:
 
 ### Image input
 
-`/image <path>` attaches an image to your next prompt. Small Harness encodes
+`/image <path>` attaches an image to your next prompt. Albatross encodes
 it as a `data:image/...;base64,...` URL and sends it as a multi-part user
 message. The catalog tracks which models accept images; you get a warning
 if your current model isn't vision-capable.
@@ -899,7 +899,7 @@ OpenRouter default model.
 
 Tool mode keeps a chosen OpenRouter coding model as the outer agent and adds
 OpenRouter's Fusion plugin so the model can invoke multi-model deliberation
-when the turn warrants it. The same Small Harness tools, approvals, session log,
+when the turn warrants it. The same Albatross tools, approvals, session log,
 token counts, and reported OpenRouter costs stay visible.
 
 ### Route tasks across a model system
@@ -933,7 +933,7 @@ OpenRouter as `reasoning.effort`; local backends ignore unsupported request
 fields while still showing the selected effort.
 
 For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
-or a planner override to create `.small-harness/plan.json`; `/plan execute`
+or a planner override to create `.albatross/plan.json`; `/plan execute`
 then runs each ready node with the configured low/medium/high coder model.
 
 Context compaction (summarizing the conversation when the prompt budget fills,
@@ -983,10 +983,10 @@ AGENT_TOOLS=file_read,grep,list_dir,file_edit,file_write,shell,update_plan,task
 AGENT_TOOL_SELECTION=auto                               # auto | fixed
 
 WARMUP=true                                             # pre-warm prompt cache at startup
-SMALL_HARNESS_NO_WIZARD=false                           # skip first-run setup
-SMALL_HARNESS_NO_UPDATE_CHECK=false                     # skip the GitHub release check
-SMALL_HARNESS_MANAGED_HOOKS_JSON='{"source":"terminal-orchestrator","hooks":{...}}'
-SMALL_HARNESS_MANAGED_HOOKS_FILE=/tmp/agent-status-hooks.json
+ALBATROSS_NO_WIZARD=false                           # skip first-run setup
+ALBATROSS_NO_UPDATE_CHECK=false                     # skip the GitHub release check
+ALBATROSS_MANAGED_HOOKS_JSON='{"source":"terminal-orchestrator","hooks":{...}}'
+ALBATROSS_MANAGED_HOOKS_FILE=/tmp/agent-status-hooks.json
 ```
 
 Full list with comments in [`.env.example`](.env.example).
@@ -1107,9 +1107,9 @@ runtime.
 
 ## Quality of life
 
-- **`small-harness --continue`** resumes the most recent session in cwd
+- **`albatross --continue`** resumes the most recent session in cwd
   without picking from a list.
-- **`small-harness completions bash|zsh|fish`** prints a completion script
+- **`albatross completions bash|zsh|fish`** prints a completion script
   you can source.
 - **`/reasoning on|off`** toggles the streaming reasoning panel — adds a
   dim "thinking…" block above the answer for o-series and similar models.
@@ -1128,22 +1128,22 @@ runtime.
   descriptions) appears beneath the prompt; the best match also shows as dim
   ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**
   accepts inline, **Esc** dismisses. It narrows live as you type.
-- **Update check.** Once a day, Small Harness checks GitHub for a newer
+- **Update check.** Once a day, Albatross checks GitHub for a newer
   release and shows a one-line notice in the banner if there is one.
-  Background, cached, opt-out with `SMALL_HARNESS_NO_UPDATE_CHECK=true`.
+  Background, cached, opt-out with `ALBATROSS_NO_UPDATE_CHECK=true`.
 - **Crash log.** If the harness panics, it writes a redacted log (API keys
   scrubbed) to `.sessions/crashes/<timestamp>.log` and prints the path so
   you have something to attach to an issue.
-- **One-shot mode** — `small-harness --print "summarize this repo"` or
-  `printf '…\n' | small-harness` for scripts and CI. Approval-gated tools
+- **One-shot mode** — `albatross --print "summarize this repo"` or
+  `printf '…\n' | albatross` for scripts and CI. Approval-gated tools
   are denied by default; pass `--allow-tools` to allow them.
-- **Agent eval** — `small-harness --eval fix-failing-test [--model M] [--json]`
+- **Agent eval** — `albatross --eval fix-failing-test [--model M] [--json]`
   runs a bundled eval fixture and exits 0/1 (for CI scripts). `--eval` can
   also point at a data-only fixture JSON file; its workspace is resolved
   relative to that file and rejected if it escapes the fixture root. In the
   interactive TUI, `/eval agent <fixture.json>` accepts the same external
   fixture path.
-- **Warmup.** Small Harness sends a 1-token request with the full system
+- **Warmup.** Albatross sends a 1-token request with the full system
   prompt + tools at startup so llama.cpp-derived engines have a hot
   prompt-eval cache before your first prompt. Disable with `WARMUP=false`.
 
@@ -1175,7 +1175,7 @@ change.
 
 Some small-model templates emit tool calls as plain content
 (`{"name": "shell", "arguments": {…}}`) instead of populating the
-`tool_calls` field. Small Harness detects and synthesizes a real tool call.
+`tool_calls` field. Albatross detects and synthesizes a real tool call.
 If a particular model still misbehaves, `llama3.1:8b` has well-tested
 tool-call templates.
 
@@ -1229,7 +1229,7 @@ log. `cargo doc --open` for module-level docs.
 ```bash
 cargo check                # type-check without producing a binary
 cargo run --release        # optimized build + run
-cargo build --release      # target/release/small-harness
+cargo build --release      # target/release/albatross
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test

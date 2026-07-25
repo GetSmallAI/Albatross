@@ -207,7 +207,7 @@ pub fn load_managed_hooks_from_env(
 
     if let Some(env_json) = env_json.map(str::trim).filter(|s| !s.is_empty()) {
         let (source, hooks) = parse_managed_hook_document(env_json)
-            .context("parsing SMALL_HARNESS_MANAGED_HOOKS_JSON")?;
+            .context("parsing ALBATROSS_MANAGED_HOOKS_JSON")?;
         if source_label.is_none() {
             source_label = source;
         }

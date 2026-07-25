@@ -93,7 +93,7 @@ fn build_request_body(req: &ChatRequest<'_>) -> Value {
 
     // Pi's ChatGPT/Codex OAuth provider does not send `max_output_tokens` to
     // `chatgpt.com/backend-api/codex/responses`; the backend rejects it with
-    // `Unsupported parameter: max_output_tokens`. Keep Small Harness' normal
+    // `Unsupported parameter: max_output_tokens`. Keep Albatross' normal
     // Chat Completions cap out of this adapter.
     if let Some(tools) = req.tools {
         body["tools"] = Value::Array(
@@ -433,6 +433,7 @@ where
         .post(url)
         .bearer_auth(&access_token)
         .header("chatgpt-account-id", account_id)
+        // Pre-rename name on purpose — see the note in codex_oauth.rs.
         .header("originator", "small-harness")
         .header("OpenAI-Beta", "responses=experimental")
         .header("accept", "text/event-stream")

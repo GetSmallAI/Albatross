@@ -1,7 +1,7 @@
 //! Spec expansion for `/plan`.
 //!
 //! Takes a one- or two-sentence intent and expands it into an ambitious product
-//! spec written to `.small-harness/spec.md`. Mirrors the drafting shape in
+//! spec written to `.albatross/spec.md`. Mirrors the drafting shape in
 //! [`crate::handoff`]: a system prompt fixes the section contract, the model
 //! drafts, [`ensure_spec_sections`] normalizes the result, and
 //! [`render_fallback_spec`] provides a deterministic spec when the model draft
@@ -31,18 +31,16 @@ const SPEC_SECTIONS: &[&str] = &[
     "Open Questions",
 ];
 
-/// Where `/plan` writes by default: `<workspace>/.small-harness/spec.md`.
+/// Where `/plan` writes by default: `<workspace>/.albatross/spec.md`.
 /// Mirrors how the project prompt is rooted in `project_memory::load_project_prompt`.
 pub fn default_spec_path(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root)
-        .join(".small-harness")
-        .join("spec.md")
+    Path::new(workspace_root).join(".albatross").join("spec.md")
 }
 
-/// Where routed plans are stored: `<workspace>/.small-harness/plan.json`.
+/// Where routed plans are stored: `<workspace>/.albatross/plan.json`.
 pub fn default_routed_plan_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root)
-        .join(".small-harness")
+        .join(".albatross")
         .join("plan.json")
 }
 
@@ -186,7 +184,7 @@ pub fn render_planner_prompt(intent: &str) -> String {
 
 pub fn routed_planner_system_prompt() -> String {
     [
-        "You are the planning agent for a complexity-aware Small Harness execution layer.",
+        "You are the planning agent for a complexity-aware Albatross execution layer.",
         "Break one software goal into a small, ordered task graph for coding agents.",
         "Return ONLY JSON, with no markdown, prose, or code fence.",
         "Use this exact top-level shape:",
@@ -582,9 +580,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_spec_path_is_under_small_harness() {
+    fn default_spec_path_is_under_albatross() {
         let path = default_spec_path("/tmp/project");
-        assert!(path.ends_with(".small-harness/spec.md"));
+        assert!(path.ends_with(".albatross/spec.md"));
         assert!(path.starts_with("/tmp/project"));
     }
 
@@ -642,9 +640,9 @@ mod tests {
     }
 
     #[test]
-    fn default_routed_plan_path_is_under_small_harness() {
+    fn default_routed_plan_path_is_under_albatross() {
         let path = default_routed_plan_path("/tmp/project");
-        assert!(path.ends_with(".small-harness/plan.json"));
+        assert!(path.ends_with(".albatross/plan.json"));
         assert!(path.starts_with("/tmp/project"));
     }
 

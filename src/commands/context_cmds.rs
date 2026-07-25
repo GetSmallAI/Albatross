@@ -25,7 +25,7 @@ fn parse_reset_args(args: &str) -> Option<ResetArgs> {
 }
 
 /// Reset the context window the article's way: draft a continuation artifact,
-/// write it to `.small-harness/continue.md`, then start a fresh session seeded
+/// write it to `.albatross/continue.md`, then start a fresh session seeded
 /// with only that artifact. Unlike `/compact` (in-place summary, same session),
 /// this is a clean slate carrying an explicit handoff.
 pub(super) async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
@@ -55,7 +55,7 @@ pub(super) async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
 }
 
 /// The shared `/reset` recipe: draft a continuation artifact from the live
-/// conversation, write it to `.small-harness/continue.md`, then (unless
+/// conversation, write it to `.albatross/continue.md`, then (unless
 /// `dry_run`) clear the session and seed a fresh one with only that artifact.
 ///
 /// Extracted so `/auto` can drive the same reset between rounds. Callers are
@@ -440,7 +440,7 @@ mod tests {
 
         cmd_reset("", &mut state).await.unwrap();
 
-        let body = fs::read_to_string(dir.path().join(".small-harness/continue.md")).unwrap();
+        let body = fs::read_to_string(dir.path().join(".albatross/continue.md")).unwrap();
         for section in [
             "## Done",
             "## In Progress",
@@ -473,7 +473,7 @@ mod tests {
 
         cmd_reset("--dry-run", &mut state).await.unwrap();
 
-        assert!(dir.path().join(".small-harness/continue.md").exists());
+        assert!(dir.path().join(".albatross/continue.md").exists());
         assert_eq!(state.messages.len(), before);
         assert_eq!(state.session_path, old_path);
     }
@@ -483,7 +483,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = test_state(dir.path());
         cmd_reset("", &mut state).await.unwrap();
-        assert!(!dir.path().join(".small-harness/continue.md").exists());
+        assert!(!dir.path().join(".albatross/continue.md").exists());
         assert!(state.messages.is_empty());
     }
 
@@ -496,7 +496,7 @@ mod tests {
             content: "x".to_string().into(),
         });
         cmd_reset("", &mut state).await.unwrap();
-        assert!(!dir.path().join(".small-harness/continue.md").exists());
+        assert!(!dir.path().join(".albatross/continue.md").exists());
         assert_eq!(state.messages.len(), 1);
     }
 }

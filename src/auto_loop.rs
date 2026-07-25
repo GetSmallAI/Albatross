@@ -21,7 +21,7 @@
 //!   so the report still shows which criteria the work actually met.
 //!
 //! Whatever the outcome, it leaves a morning report at
-//! `.small-harness/auto-report.md`.
+//! `.albatross/auto-report.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,7 +64,7 @@ pub struct AutoOptions {
     /// The working goal. Empty is allowed only when `use_spec` is set and the
     /// spec supplies a Goal.
     pub goal: String,
-    /// Read the goal and Done Criteria from `.small-harness/spec.md`.
+    /// Read the goal and Done Criteria from `.albatross/spec.md`.
     pub use_spec: bool,
     /// Round ceiling for this run (clamped to [`MAX_ROUNDS_CEILING`]).
     pub max_rounds: usize,
@@ -153,10 +153,10 @@ struct AutoRun {
     last_done_check: Option<DoneCheck>,
 }
 
-/// `<workspace>/.small-harness/auto-report.md`.
+/// `<workspace>/.albatross/auto-report.md`.
 pub fn default_auto_report_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root)
-        .join(".small-harness")
+        .join(".albatross")
         .join("auto-report.md")
 }
 
@@ -411,7 +411,7 @@ pub async fn run_auto_loop(state: &mut AppState, opts: AutoOptions) -> Result<()
     loop_result
 }
 
-/// Render the report and write it to `.small-harness/auto-report.md`, creating
+/// Render the report and write it to `.albatross/auto-report.md`, creating
 /// the parent directory if needed. Returns the path written.
 fn write_auto_report(
     run: &AutoRun,
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn write_auto_report_creates_file_under_small_harness() {
+    fn write_auto_report_creates_file_under_albatross() {
         let dir = tempfile::tempdir().unwrap();
         let run = AutoRun {
             rounds: vec![RoundRecord {
@@ -1243,7 +1243,7 @@ mod tests {
             last_done_check: None,
         };
         let path = write_auto_report(&run, "goal", &[], &dir.path().display().to_string()).unwrap();
-        assert!(path.ends_with(".small-harness/auto-report.md"));
+        assert!(path.ends_with(".albatross/auto-report.md"));
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("Stopped on a turn error"));
     }

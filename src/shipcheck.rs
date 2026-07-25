@@ -426,7 +426,7 @@ pub fn render_markdown(
     freshness: Option<&ProjectIndexFreshness>,
 ) -> String {
     let mut out = String::new();
-    out.push_str("# Small Harness Shipcheck\n\n");
+    out.push_str("# Albatross Shipcheck\n\n");
     out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
     out.push_str("## Git\n\n");
     out.push_str(&format!("- Workspace: `{}`\n", snapshot.workspace_root));
@@ -803,7 +803,7 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs
         };
         let md = render_markdown(&snapshot, Some(&freshness));
 
-        assert!(md.contains("# Small Harness Shipcheck"));
+        assert!(md.contains("# Albatross Shipcheck"));
         assert!(md.contains("main -> origin/main (+1/-0)"));
         assert!(md.contains("- Staged files: 1"));
         assert!(md.contains("src/main.rs | 1 +"));

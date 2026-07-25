@@ -177,7 +177,7 @@ pub(super) async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
     fs::create_dir_all(&eval_dir)?;
     let id = Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ").to_string();
     let mut json_results = Vec::new();
-    let mut md = String::from("# Small Harness Eval\n\n");
+    let mut md = String::from("# Albatross Eval\n\n");
     for spec in model_specs {
         let (backend_desc, model) = parse_eval_model(&spec, state);
         validate(&backend_desc)?;

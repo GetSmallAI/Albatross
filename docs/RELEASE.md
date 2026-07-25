@@ -1,6 +1,6 @@
 # Release checklist
 
-Use this when shipping a new Small Harness version. **Updating version fields in
+Use this when shipping a new Albatross version. **Updating version fields in
 the repo is not a release.** A release exists only after the tag, GitHub
 Release workflow, and (when configured) Homebrew tap update.
 
@@ -55,8 +55,8 @@ Typical pattern (see `chore: release 1.0.2` on `main`):
    ```
    Confirm macOS `.tar.gz` assets and `SHA256SUMS` on the release page.
 6. **Verify Homebrew tap** (when token configured):
-   - `GetSmallAI/homebrew-tap` → `Formula/small-harness.rb` shows `version "X.Y.Z"`.
-   - Optionally: `brew upgrade small-harness` from a machine using the tap.
+   - `GetSmallAI/homebrew-tap` → `Formula/albatross.rb` shows `version "X.Y.Z"`.
+   - Optionally: `brew upgrade albatross` from a machine using the tap.
 
 ## If something fails
 

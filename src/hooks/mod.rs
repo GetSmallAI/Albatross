@@ -434,7 +434,7 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("parsing SMALL_HARNESS_MANAGED_HOOKS_JSON"));
+        assert!(err.contains("parsing ALBATROSS_MANAGED_HOOKS_JSON"));
     }
 
     #[test]
@@ -444,14 +444,14 @@ mod tests {
                 .unwrap()
                 .display()
                 .to_string(),
-            "/tmp/xdg/small-harness/hooks-state.json"
+            "/tmp/xdg/albatross/hooks-state.json"
         );
         assert_eq!(
             hook_state_file_path_from_env(None, Some("/tmp/home"))
                 .unwrap()
                 .display()
                 .to_string(),
-            "/tmp/home/.config/small-harness/hooks-state.json"
+            "/tmp/home/.config/albatross/hooks-state.json"
         );
         assert!(hook_state_file_path_from_env(None, None).is_none());
     }
@@ -536,16 +536,16 @@ mod tests {
 
     #[tokio::test]
     async fn command_runner_forwards_requested_parent_env_vars_only() {
-        let _forwarded = EnvVarGuard::set("SMALL_HARNESS_TEST_FORWARD", "forwarded");
-        let _blocked = EnvVarGuard::set("SMALL_HARNESS_TEST_BLOCKED", "blocked");
+        let _forwarded = EnvVarGuard::set("ALBATROSS_TEST_FORWARD", "forwarded");
+        let _blocked = EnvVarGuard::set("ALBATROSS_TEST_BLOCKED", "blocked");
         let handler = HookCommandConfig {
-            command: r#"if [ "$SMALL_HARNESS_TEST_FORWARD" = "forwarded" ] && [ -z "$SMALL_HARNESS_TEST_BLOCKED" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            command: r#"if [ "$ALBATROSS_TEST_FORWARD" = "forwarded" ] && [ -z "$ALBATROSS_TEST_BLOCKED" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
             timeout_sec: default_hook_timeout_sec(),
             command_windows: None,
             status_message: None,
             async_handler: false,
             env: BTreeMap::new(),
-            env_vars: vec!["SMALL_HARNESS_TEST_FORWARD".into()],
+            env_vars: vec!["ALBATROSS_TEST_FORWARD".into()],
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -558,9 +558,9 @@ mod tests {
     #[tokio::test]
     async fn command_runner_adds_literal_hook_env() {
         let mut env = BTreeMap::new();
-        env.insert("SMALL_HARNESS_LITERAL".into(), "literal".into());
+        env.insert("ALBATROSS_LITERAL".into(), "literal".into());
         let handler = HookCommandConfig {
-            command: r#"if [ "$SMALL_HARNESS_LITERAL" = "literal" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            command: r#"if [ "$ALBATROSS_LITERAL" = "literal" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
             timeout_sec: default_hook_timeout_sec(),
             command_windows: None,
             status_message: None,
@@ -578,17 +578,39 @@ mod tests {
 
     #[tokio::test]
     async fn command_runner_reserved_hook_env_overrides_configured_env() {
-        let _parent = EnvVarGuard::set("SMALL_HARNESS_SESSION_ID", "parent");
+        let _parent = EnvVarGuard::set("ALBATROSS_SESSION_ID", "parent");
         let mut env = BTreeMap::new();
-        env.insert("SMALL_HARNESS_SESSION_ID".into(), "literal".into());
+        env.insert("ALBATROSS_SESSION_ID".into(), "literal".into());
         let handler = HookCommandConfig {
-            command: r#"if [ "$SMALL_HARNESS_SESSION_ID" = "s1" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            command: r#"if [ "$ALBATROSS_SESSION_ID" = "s1" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
             timeout_sec: default_hook_timeout_sec(),
             command_windows: None,
             status_message: None,
             async_handler: false,
             env,
-            env_vars: vec!["SMALL_HARNESS_SESSION_ID".into()],
+            env_vars: vec!["ALBATROSS_SESSION_ID".into()],
+        };
+        let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
+
+        let result = run_command_hook(&handler, &payload).await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn command_runner_still_exports_pre_rename_env_prefix() {
+        // Hook scripts written before the Albatross rename read SMALL_HARNESS_*.
+        // They must keep working for a release rather than silently receiving an
+        // empty string.
+        let handler = HookCommandConfig {
+            command: r#"if [ "$SMALL_HARNESS_SESSION_ID" = "s1" ] && [ "$SMALL_HARNESS_HOOK_EVENT" = "SessionStart" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            timeout_sec: default_hook_timeout_sec(),
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -1190,7 +1212,7 @@ mod tests {
         config.permission_request.push(HookGroupConfig {
             matcher: Some("shell".into()),
             hooks: vec![HookCommandConfig {
-                command: "small-harness-definitely-missing-hook-command".into(),
+                command: "albatross-definitely-missing-hook-command".into(),
                 timeout_sec: default_hook_timeout_sec(),
                 command_windows: None,
                 status_message: None,
