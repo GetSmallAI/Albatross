@@ -21,6 +21,7 @@ mod context_guard;
 mod continuation;
 mod crash_log;
 mod diff_view;
+mod dir_migration;
 mod fable_usage;
 mod fix_loop;
 mod handoff;
@@ -339,12 +340,8 @@ fn parse_eval_args() -> Option<anyhow::Result<CliEval>> {
 /// Companion to the config-directory migration, for the per-project scratch
 /// directory. Needs a loaded config because `workspace_root` is configurable.
 fn migrate_workspace_scratch(workspace_root: &str) {
-    if let Some((from, to)) = crate::config::migrate_legacy_workspace_dir(workspace_root) {
-        eprintln!(
-            "moved workspace scratch {} → {}",
-            from.display(),
-            to.display()
-        );
+    if let Some(migration) = crate::config::migrate_legacy_workspace_dir(workspace_root) {
+        eprintln!("workspace scratch: {}", migration.describe());
     }
 }
 
@@ -692,8 +689,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Runs before anything reads the config directory, so a pre-rename install
     // carries its credentials over instead of looking logged out.
-    if let Some((from, to)) = crate::auth::migrate_legacy_config_dir() {
-        eprintln!("moved config {} → {}", from.display(), to.display());
+    if let Some(migration) = crate::auth::migrate_legacy_config_dir() {
+        eprintln!("config: {}", migration.describe());
     }
     crate::auth::hydrate_env_from_file();
     crate::crash_log::install_panic_hook();

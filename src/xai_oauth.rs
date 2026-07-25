@@ -484,16 +484,33 @@ fn read_grok_cli_version_json() -> Option<String> {
     normalize_client_version(version)
 }
 
+/// Resolve the version to advertise to the Grok proxy, without writing: this is
+/// called on every chat request (and from tests), so persisting here would both
+/// rewrite the cache needlessly and create the config directory as a side
+/// effect. Only `capture_and_cache_client_version` writes.
 pub fn client_version() -> String {
-    let version = read_cached_client_version()
-        .or_else(read_grok_cli_version_json)
-        .unwrap_or_else(|| CLIENT_VERSION_FALLBACK.to_string());
-    let _ = write_cached_client_version(&version);
-    version
+    resolve_client_version(read_cached_client_version(), read_grok_cli_version_json)
 }
 
+/// Precedence: our cache, then the installed Grok CLI's `version.json`, then the
+/// pinned fallback. Takes its inputs so the order can be tested without reading
+/// the real config directory; the second source stays lazy because this runs on
+/// every chat request.
+fn resolve_client_version(
+    cached: Option<String>,
+    from_grok_cli: impl FnOnce() -> Option<String>,
+) -> String {
+    cached
+        .or_else(from_grok_cli)
+        .unwrap_or_else(|| CLIENT_VERSION_FALLBACK.to_string())
+}
+
+/// Resolve and persist the version. Called on a successful login, where writing
+/// to the config directory is expected anyway.
 pub fn capture_and_cache_client_version() -> String {
-    client_version()
+    let version = client_version();
+    let _ = write_cached_client_version(&version);
+    version
 }
 
 pub fn user_agent() -> String {
@@ -1133,5 +1150,33 @@ mod tests {
     #[test]
     fn client_version_fallback_is_current_proxy_default() {
         assert_eq!(CLIENT_VERSION_FALLBACK, "0.2.93");
+    }
+
+    #[test]
+    fn resolve_client_version_prefers_cache_then_grok_cli_then_fallback() {
+        assert_eq!(
+            resolve_client_version(Some("0.2.100".into()), || Some("0.2.50".into())),
+            "0.2.100"
+        );
+        assert_eq!(
+            resolve_client_version(None, || Some("0.2.50".into())),
+            "0.2.50"
+        );
+        assert_eq!(
+            resolve_client_version(None, || None),
+            CLIENT_VERSION_FALLBACK
+        );
+    }
+
+    #[test]
+    fn resolve_client_version_does_not_consult_grok_cli_when_cached() {
+        // The lazy second source matters: this runs on every chat request.
+        let mut consulted = false;
+        let version = resolve_client_version(Some("0.2.100".into()), || {
+            consulted = true;
+            None
+        });
+        assert_eq!(version, "0.2.100");
+        assert!(!consulted, "cache hit should short-circuit the file read");
     }
 }

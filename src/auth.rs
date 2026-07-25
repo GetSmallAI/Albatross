@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::dir_migration::Migration;
+
 /// Persistent on-disk credential store.
 ///
 /// Legacy files used `{"<provider>": "<api-key>"}`.  New files may also store
@@ -98,25 +100,17 @@ pub fn auth_file_path() -> Option<PathBuf> {
 /// an existing install keeps its OAuth tokens, API keys, and scorecard history
 /// instead of silently appearing logged out after the rename.
 ///
-/// Must run before anything reads the config directory. Returns the moved
-/// `(from, to)` pair when a migration happened.
-pub fn migrate_legacy_config_dir() -> Option<(PathBuf, PathBuf)> {
+/// Must run before anything reads the config directory.
+pub fn migrate_legacy_config_dir() -> Option<Migration> {
     migrate_config_dir_in(&config_base()?)
 }
 
 /// Migration logic against an explicit base, so tests don't mutate process env.
-/// Best-effort: a failed move leaves the legacy directory untouched rather than
-/// blocking startup.
-fn migrate_config_dir_in(base: &Path) -> Option<(PathBuf, PathBuf)> {
-    let legacy = base.join(LEGACY_CONFIG_DIR_NAME);
-    let current = base.join(CONFIG_DIR_NAME);
-    // Never overwrite an existing Albatross directory: if both exist the user
-    // has already run a renamed build, and the legacy copy is stale.
-    if current.exists() || !legacy.is_dir() {
-        return None;
-    }
-    fs::rename(&legacy, &current).ok()?;
-    Some((legacy, current))
+fn migrate_config_dir_in(base: &Path) -> Option<Migration> {
+    crate::dir_migration::migrate_dir(
+        base.join(LEGACY_CONFIG_DIR_NAME),
+        base.join(CONFIG_DIR_NAME),
+    )
 }
 
 impl AuthStore {
@@ -369,30 +363,48 @@ mod tests {
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("auth.json"), r#"{"openai":"sk-keep"}"#).unwrap();
 
-        let moved = migrate_config_dir_in(base.path()).expect("migration should run");
-        assert_eq!(moved.1, base.path().join("albatross"));
+        let current = base.path().join("albatross");
+        migrate_config_dir_in(base.path()).expect("migration should run");
         assert!(!legacy.exists());
 
         // The credential survives the move — the whole point of migrating.
-        let store = AuthStore::load_from(&moved.1.join("auth.json")).unwrap();
+        let store = AuthStore::load_from(&current.join("auth.json")).unwrap();
         assert_eq!(store.get("openai"), Some("sk-keep"));
     }
 
     #[test]
-    fn migration_is_a_no_op_when_already_renamed() {
+    fn migration_keeps_a_live_credential_and_never_clobbers_it() {
         let base = tempfile::tempdir().unwrap();
         let legacy = base.path().join("small-harness");
         let current = base.path().join("albatross");
         fs::create_dir_all(&legacy).unwrap();
         fs::create_dir_all(&current).unwrap();
+        fs::write(legacy.join("auth.json"), r#"{"openai":"sk-stale"}"#).unwrap();
         fs::write(current.join("auth.json"), r#"{"openai":"sk-new"}"#).unwrap();
 
-        // Both exist: the user already ran a renamed build, so the current
-        // directory must not be clobbered by the stale legacy copy.
+        // Both hold credentials: the renamed build's copy wins, untouched.
         assert!(migrate_config_dir_in(base.path()).is_none());
         let store = AuthStore::load_from(&current.join("auth.json")).unwrap();
         assert_eq!(store.get("openai"), Some("sk-new"));
         assert!(legacy.exists());
+    }
+
+    #[test]
+    fn migration_rescues_a_credential_a_stray_cache_file_would_have_stranded() {
+        // Regression: running the test suite (or any build that only meant to
+        // read) used to create the new config directory holding nothing but a
+        // cache file, which made the old skip-if-exists rule strand the login.
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("small-harness");
+        let current = base.path().join("albatross");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::write(legacy.join("auth.json"), r#"{"openai":"sk-keep"}"#).unwrap();
+        fs::write(current.join("grok-client-version"), "0.2.93\n").unwrap();
+
+        migrate_config_dir_in(base.path()).expect("migration should run");
+        let store = AuthStore::load_from(&current.join("auth.json")).unwrap();
+        assert_eq!(store.get("openai"), Some("sk-keep"));
     }
 
     #[test]

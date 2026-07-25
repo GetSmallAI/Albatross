@@ -21,18 +21,17 @@ const LEGACY_WORKSPACE_SCRATCH_DIR: &str = ".small-harness";
 /// Most of its contents regenerate, but `rubric.md` and `spec.md` are usually
 /// hand-written, so ignoring the old directory would quietly lose real work.
 ///
-/// Best-effort and idempotent: skipped when the current directory already
-/// exists, so a stale legacy copy can never overwrite live files. Returns the
-/// moved `(from, to)` pair when a migration happened.
-pub fn migrate_legacy_workspace_dir(workspace_root: &str) -> Option<(PathBuf, PathBuf)> {
+/// Best-effort and idempotent, and it merges rather than skipping when
+/// `.albatross/` already exists — any single run creates that directory, so an
+/// all-or-nothing skip would strand a hand-written `rubric.md` next door.
+pub fn migrate_legacy_workspace_dir(
+    workspace_root: &str,
+) -> Option<crate::dir_migration::Migration> {
     let base = Path::new(workspace_root);
-    let legacy = base.join(LEGACY_WORKSPACE_SCRATCH_DIR);
-    let current = base.join(WORKSPACE_SCRATCH_DIR);
-    if current.exists() || !legacy.is_dir() {
-        return None;
-    }
-    std::fs::rename(&legacy, &current).ok()?;
-    Some((legacy, current))
+    crate::dir_migration::migrate_dir(
+        base.join(LEGACY_WORKSPACE_SCRATCH_DIR),
+        base.join(WORKSPACE_SCRATCH_DIR),
+    )
 }
 
 pub const ALL_TOOL_NAMES: &[&str] = &[
@@ -1434,10 +1433,10 @@ mod tests {
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("rubric.md"), "## Clarity (weight: 2)\n").unwrap();
 
-        let moved = migrate_legacy_workspace_dir(&root).expect("migration should run");
-        assert_eq!(moved.1, dir.path().join(".albatross"));
+        migrate_legacy_workspace_dir(&root).expect("migration should run");
         assert!(!legacy.exists());
-        let rubric = std::fs::read_to_string(moved.1.join("rubric.md")).unwrap();
+        let rubric =
+            std::fs::read_to_string(dir.path().join(".albatross").join("rubric.md")).unwrap();
         assert!(rubric.contains("Clarity"));
     }
 
@@ -1453,6 +1452,24 @@ mod tests {
         assert!(migrate_legacy_workspace_dir(&root).is_none());
         let rubric = std::fs::read_to_string(current.join("rubric.md")).unwrap();
         assert_eq!(rubric, "current\n");
+    }
+
+    #[test]
+    fn workspace_migration_rescues_notes_a_prior_run_would_have_stranded() {
+        // Any single run creates `.albatross/`, so the hand-written rubric next
+        // door has to be carried over rather than skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        let legacy = dir.path().join(".small-harness");
+        let current = dir.path().join(".albatross");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("rubric.md"), "## Clarity (weight: 2)\n").unwrap();
+        std::fs::write(current.join("auto-report.md"), "generated\n").unwrap();
+
+        migrate_legacy_workspace_dir(&root).expect("migration should run");
+        let rubric = std::fs::read_to_string(current.join("rubric.md")).unwrap();
+        assert!(rubric.contains("Clarity"));
     }
 
     #[test]
