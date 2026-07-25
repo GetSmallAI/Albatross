@@ -138,17 +138,14 @@ impl TurnCapturer {
     pub async fn snapshot_before_tool(&mut self, tool_name: &str, args: &Value) {
         let paths = paths_from_tool_call(tool_name, args, &self.workspace_root);
         for path in paths {
-            let _ = self.snapshot_file(&path);
+            let _ = snapshot_file_into_async(
+                &mut self.checkpoint,
+                &self.workspace_root,
+                &path,
+                self.limits,
+            )
+            .await;
         }
-    }
-
-    pub fn snapshot_file(&mut self, rel_path: &str) -> std::io::Result<()> {
-        snapshot_file_into(
-            &mut self.checkpoint,
-            &self.workspace_root,
-            rel_path,
-            self.limits,
-        )
     }
 
     pub fn into_checkpoint(self) -> TurnCheckpoint {
@@ -218,11 +215,42 @@ pub fn snapshot_file_into(
     rel_path: &str,
     limits: CheckpointLimits,
 ) -> std::io::Result<()> {
-    if checkpoint.files.contains_key(rel_path) {
+    let Some(full_path) = prepare_snapshot_path(checkpoint, workspace_root, rel_path)? else {
         return Ok(());
+    };
+    let bytes = fs::read(&full_path)?;
+    ingest_snapshot_bytes(checkpoint, rel_path, bytes, limits);
+    Ok(())
+}
+
+/// Async twin of [`snapshot_file_into`] for the agent loop: large file reads
+/// stay off the async runtime's worker threads.
+pub async fn snapshot_file_into_async(
+    checkpoint: &mut TurnCheckpoint,
+    workspace_root: &Path,
+    rel_path: &str,
+    limits: CheckpointLimits,
+) -> std::io::Result<()> {
+    let Some(full_path) = prepare_snapshot_path(checkpoint, workspace_root, rel_path)? else {
+        return Ok(());
+    };
+    let bytes = tokio::fs::read(&full_path).await?;
+    ingest_snapshot_bytes(checkpoint, rel_path, bytes, limits);
+    Ok(())
+}
+
+/// Resolve path and record missing/non-file baselines. `Ok(None)` means the
+/// caller should stop (already snapshotted, missing, or not a file).
+fn prepare_snapshot_path(
+    checkpoint: &mut TurnCheckpoint,
+    workspace_root: &Path,
+    rel_path: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    if checkpoint.files.contains_key(rel_path) {
+        return Ok(None);
     }
     let Some(full_path) = resolve_under_workspace(workspace_root, rel_path) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let existed = full_path.exists();
@@ -235,15 +263,23 @@ pub fn snapshot_file_into(
                 content: None,
             },
         );
-        return Ok(());
+        return Ok(None);
     }
 
     if !full_path.is_file() {
         checkpoint.skipped.push(rel_path.to_string());
-        return Ok(());
+        return Ok(None);
     }
 
-    let bytes = fs::read(&full_path)?;
+    Ok(Some(full_path))
+}
+
+fn ingest_snapshot_bytes(
+    checkpoint: &mut TurnCheckpoint,
+    rel_path: &str,
+    bytes: Vec<u8>,
+    limits: CheckpointLimits,
+) {
     if looks_binary(&bytes) {
         checkpoint.skipped.push(rel_path.to_string());
         checkpoint.files.insert(
@@ -254,7 +290,7 @@ pub fn snapshot_file_into(
                 content: None,
             },
         );
-        return Ok(());
+        return;
     }
 
     let file_len = bytes.len() as u64;
@@ -268,12 +304,12 @@ pub fn snapshot_file_into(
                 content: None,
             },
         );
-        return Ok(());
+        return;
     }
 
     if checkpoint.snapshot_bytes + file_len > limits.max_bytes {
         checkpoint.skipped.push(rel_path.to_string());
-        return Ok(());
+        return;
     }
 
     checkpoint.snapshot_bytes += file_len;
@@ -285,7 +321,6 @@ pub fn snapshot_file_into(
             content: Some(bytes),
         },
     );
-    Ok(())
 }
 
 pub fn restore_file_baselines(
@@ -432,6 +467,33 @@ mod tests {
         let paths =
             paths_from_tool_call("file_edit", &json!({ "path": "src/main.rs" }), dir.path());
         assert_eq!(paths, vec!["src/main.rs"]);
+    }
+
+    #[tokio::test]
+    async fn async_snapshot_matches_sync_api() {
+        let dir = workspace();
+        fs::write(dir.path().join("note.txt"), "hello\n").unwrap();
+        let limits = CheckpointLimits::default();
+
+        let mut sync_cp = TurnCheckpoint::new();
+        snapshot_file_into(&mut sync_cp, dir.path(), "note.txt", limits).unwrap();
+
+        let mut async_cp = TurnCheckpoint::new();
+        snapshot_file_into_async(&mut async_cp, dir.path(), "note.txt", limits)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sync_cp
+                .files
+                .get("note.txt")
+                .and_then(|f| f.content.clone()),
+            async_cp
+                .files
+                .get("note.txt")
+                .and_then(|f| f.content.clone())
+        );
+        assert_eq!(sync_cp.snapshot_bytes, async_cp.snapshot_bytes);
     }
 
     #[test]
