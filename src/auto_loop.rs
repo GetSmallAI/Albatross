@@ -1100,7 +1100,11 @@ mod tests {
         // A run that never cleared the threshold has no criteria state yet.
         assert!(should_run_final_done_check(false, 3, StopReason::MaxRounds));
         assert!(should_run_final_done_check(false, 3, StopReason::Stalled));
-        assert!(should_run_final_done_check(false, 3, StopReason::BudgetExhausted));
+        assert!(should_run_final_done_check(
+            false,
+            3,
+            StopReason::BudgetExhausted
+        ));
     }
 
     #[test]
@@ -1108,9 +1112,17 @@ mod tests {
         // A passing round already reported — don't pay twice.
         assert!(!should_run_final_done_check(true, 3, StopReason::GoalMet));
         // No criteria to check.
-        assert!(!should_run_final_done_check(false, 0, StopReason::MaxRounds));
+        assert!(!should_run_final_done_check(
+            false,
+            0,
+            StopReason::MaxRounds
+        ));
         // Ctrl-C means stop now, not "make one more model call".
-        assert!(!should_run_final_done_check(false, 3, StopReason::Interrupted));
+        assert!(!should_run_final_done_check(
+            false,
+            3,
+            StopReason::Interrupted
+        ));
     }
 
     #[test]
