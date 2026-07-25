@@ -384,6 +384,8 @@ this exact call`. The session cache resets on `/new`.
 /model [id] [--default]      list / pick a model; --default pins backend+model
 /tools auto|fixed|<…>  show or set the active tool pool
 /auth                  manage API keys and OAuth credentials
+/login [provider]      sign in (defaults to active OAuth backend)
+/logout [provider]     clear stored OAuth login (defaults to active OAuth backend)
 /login openai-codex    sign in with ChatGPT/Codex subscription OAuth
 /logout openai-codex   clear the stored ChatGPT/Codex login
 /login grok            sign in with SuperGrok / X Premium+ OAuth
@@ -433,11 +435,18 @@ no change in behavior.
 /auth set openai         paste your OpenAI key, save to file + this session
 /auth set openrouter     paste your OpenRouter key
 /auth clear openai       remove from the file (env stays for this session)
+/login                   browser/device-code login for the active OAuth backend
+/logout                  clear stored login for the active OAuth backend
 /login openai-codex      browser/device-code login with ChatGPT/Codex
 /logout openai-codex     remove the stored OAuth credential
 /login grok              browser/device-code login with SuperGrok / X Premium+
 /logout grok             remove the stored Grok OAuth credential
 ```
+
+Bare `/login` and `/logout` use the **active OAuth backend** (`grok` or
+`openai-codex`). On a non-OAuth backend (or via `/auth login` with no
+provider), pass the provider explicitly.
+
 
 `openai-codex` is not an `OPENAI_API_KEY` replacement. It uses browser/device
 OAuth, stores `{access, refresh, expires, accountId}` in the same `auth.json`,

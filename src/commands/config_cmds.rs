@@ -212,20 +212,68 @@ pub(super) async fn cmd_auth(args: &str) -> Result<()> {
 
 struct AppStateLoginOnly;
 
+/// Explicit OAuth provider names accepted by `/login` / `/logout`.
 fn normalize_login_provider(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "openai-codex" | "codex" | "chatgpt" => Some("openai-codex"),
+        "openai-codex" | "codex" | "chatgpt" => Some("openai-codex"),
         "grok" | "xai" | "xai-oauth" | "x-ai" | "supergrok" | "grok-oauth" => Some("grok"),
         _ => None,
     }
 }
 
+/// Resolve which OAuth provider `/login` / `/logout` should target.
+///
+/// - Explicit args win (`/logout grok`, `/login codex`, …).
+/// - Bare commands use the **active OAuth backend** when the session is on
+///   `grok` or `openai-codex`.
+/// - Bare commands with a non-OAuth backend (or no backend context, e.g.
+///   `/auth login`) require an explicit provider — no silent Codex default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginProviderResolve {
+    Provider(&'static str),
+    NeedProvider,
+    Unknown,
+}
+
+fn resolve_login_provider(
+    raw: &str,
+    active_backend: Option<crate::backends::BackendName>,
+) -> LoginProviderResolve {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        return match normalize_login_provider(trimmed) {
+            Some(p) => LoginProviderResolve::Provider(p),
+            None => LoginProviderResolve::Unknown,
+        };
+    }
+    match active_backend {
+        Some(b) if b.is_oauth_login() => LoginProviderResolve::Provider(b.as_str()),
+        _ => LoginProviderResolve::NeedProvider,
+    }
+}
+
+fn print_login_provider_error(action: &str, args: &str, resolve: LoginProviderResolve) {
+    match resolve {
+        LoginProviderResolve::NeedProvider => {
+            println!(
+                "  {RED}✗{RESET} {DIM}usage: /{action} <openai-codex|grok> \
+                 (or switch to an OAuth backend first){RESET}"
+            );
+        }
+        LoginProviderResolve::Unknown => {
+            println!(
+                "  {RED}✗{RESET} {DIM}unknown {action} provider: {} (try: openai-codex, grok){RESET}",
+                args.trim()
+            );
+        }
+        LoginProviderResolve::Provider(_) => {}
+    }
+}
+
 pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result<()> {
-    let Some(provider) = normalize_login_provider(args) else {
-        println!(
-            "  {RED}✗{RESET} {DIM}unknown login provider: {} (try: openai-codex, grok){RESET}",
-            args.trim()
-        );
+    let resolve = resolve_login_provider(args, state.active_backend());
+    let LoginProviderResolve::Provider(provider) = resolve else {
+        print_login_provider_error("login", args, resolve);
         return Ok(());
     };
 
@@ -267,6 +315,9 @@ pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result
 pub(super) trait LoginState {
     fn http(&self) -> &reqwest::Client;
     fn after_login(&mut self) -> Result<()>;
+    /// Active backend for bare `/login` defaulting. `None` when there is no
+    /// session context (e.g. `/auth login`).
+    fn active_backend(&self) -> Option<crate::backends::BackendName>;
 }
 
 impl LoginState for AppState {
@@ -280,6 +331,9 @@ impl LoginState for AppState {
         }
         Ok(())
     }
+    fn active_backend(&self) -> Option<crate::backends::BackendName> {
+        Some(self.config.backend)
+    }
 }
 
 impl LoginState for AppStateLoginOnly {
@@ -290,14 +344,18 @@ impl LoginState for AppStateLoginOnly {
     fn after_login(&mut self) -> Result<()> {
         Ok(())
     }
+    fn active_backend(&self) -> Option<crate::backends::BackendName> {
+        None
+    }
 }
 
-pub(super) fn cmd_logout(args: &str) -> Result<()> {
-    let Some(provider) = normalize_login_provider(args) else {
-        println!(
-            "  {RED}✗{RESET} {DIM}unknown logout provider: {} (try: openai-codex, grok){RESET}",
-            args.trim()
-        );
+pub(super) fn cmd_logout(
+    args: &str,
+    active_backend: Option<crate::backends::BackendName>,
+) -> Result<()> {
+    let resolve = resolve_login_provider(args, active_backend);
+    let LoginProviderResolve::Provider(provider) = resolve else {
+        print_login_provider_error("logout", args, resolve);
         return Ok(());
     };
     let mut store = crate::auth::AuthStore::load();
@@ -1307,6 +1365,53 @@ mod tests {
         assert_eq!(state.config.mode, OperatorMode::Ship);
         assert!(state.config.checkpoints.enabled);
         assert!(state.checkpoints_enabled);
+    }
+
+    #[test]
+    fn resolve_login_provider_explicit_aliases() {
+        use crate::backends::BackendName;
+        assert_eq!(
+            resolve_login_provider("codex", Some(BackendName::Grok)),
+            LoginProviderResolve::Provider("openai-codex")
+        );
+        assert_eq!(
+            resolve_login_provider("xai", Some(BackendName::OpenAiCodex)),
+            LoginProviderResolve::Provider("grok")
+        );
+        assert_eq!(
+            resolve_login_provider("nope", None),
+            LoginProviderResolve::Unknown
+        );
+    }
+
+    #[test]
+    fn resolve_login_provider_bare_uses_active_oauth_backend() {
+        use crate::backends::BackendName;
+        assert_eq!(
+            resolve_login_provider("", Some(BackendName::Grok)),
+            LoginProviderResolve::Provider("grok")
+        );
+        assert_eq!(
+            resolve_login_provider("  ", Some(BackendName::OpenAiCodex)),
+            LoginProviderResolve::Provider("openai-codex")
+        );
+    }
+
+    #[test]
+    fn resolve_login_provider_bare_requires_provider_without_oauth_backend() {
+        use crate::backends::BackendName;
+        assert_eq!(
+            resolve_login_provider("", Some(BackendName::Ollama)),
+            LoginProviderResolve::NeedProvider
+        );
+        assert_eq!(
+            resolve_login_provider("", Some(BackendName::OpenAi)),
+            LoginProviderResolve::NeedProvider
+        );
+        assert_eq!(
+            resolve_login_provider("", None),
+            LoginProviderResolve::NeedProvider
+        );
     }
 
     #[test]

@@ -165,9 +165,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/login",
-        "Browser/device-code login for subscription providers (openai-codex, grok)",
+        "Browser/device-code login (defaults to active OAuth backend: openai-codex, grok)",
     ),
-    ("/logout", "Clear an OAuth login (openai-codex, grok)"),
+    (
+        "/logout",
+        "Clear an OAuth login (defaults to active OAuth backend: openai-codex, grok)",
+    ),
     (
         "/image",
         "Attach an image to the next user prompt (vision-capable models only)",
@@ -287,7 +290,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/export" => session::cmd_export(&args, state)?,
         "/auth" => config_cmds::cmd_auth(&args).await?,
         "/login" => config_cmds::cmd_login(&args, state).await?,
-        "/logout" => config_cmds::cmd_logout(&args)?,
+        "/logout" => config_cmds::cmd_logout(&args, Some(state.config.backend))?,
         "/image" => config_cmds::cmd_image(&args, state),
         "/reasoning" => config_cmds::cmd_reasoning(&args, state),
         "/verbose" => config_cmds::cmd_verbose(&args, state),
