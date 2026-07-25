@@ -336,6 +336,18 @@ fn parse_eval_args() -> Option<anyhow::Result<CliEval>> {
     })
 }
 
+/// Companion to the config-directory migration, for the per-project scratch
+/// directory. Needs a loaded config because `workspace_root` is configurable.
+fn migrate_workspace_scratch(workspace_root: &str) {
+    if let Some((from, to)) = crate::config::migrate_legacy_workspace_dir(workspace_root) {
+        eprintln!(
+            "moved workspace scratch {} → {}",
+            from.display(),
+            to.display()
+        );
+    }
+}
+
 async fn run_eval_cli(opts: CliEval) -> anyhow::Result<()> {
     let config = load_config();
     crate::theme::init(config.display.color, config.display.ascii);
@@ -394,6 +406,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
     }
     let config = load_config();
     crate::theme::init(config.display.color, config.display.ascii);
+    migrate_workspace_scratch(&config.workspace_root);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
     validate(&backend_desc)?;
@@ -704,6 +717,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
     crate::theme::init(config.display.color, config.display.ascii);
+    migrate_workspace_scratch(&config.workspace_root);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
     let missing_oauth_login = config.backend.is_oauth_login()
