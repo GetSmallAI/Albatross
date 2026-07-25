@@ -206,7 +206,7 @@ async fn shutdown_interactive_session(state: &mut AppState) -> anyhow::Result<()
     Ok(())
 }
 
-/// Returns the shell name if the user invoked `small-harness completions <shell>`.
+/// Returns the shell name if the user invoked `albatross completions <shell>`.
 /// Recognized shells: bash, zsh, fish.
 fn parse_completions_arg() -> Option<String> {
     let mut args = std::env::args().skip(1);
@@ -218,15 +218,15 @@ fn parse_completions_arg() -> Option<String> {
 }
 
 fn print_usage() {
-    println!("small-harness {}", env!("CARGO_PKG_VERSION"));
+    println!("albatross {}", env!("CARGO_PKG_VERSION"));
     println!("A small, terminal-first coding harness.");
     println!();
     println!("USAGE:");
-    println!("  small-harness                      Start an interactive session");
-    println!("  small-harness --print <text>       Run one prompt and exit (also reads stdin)");
-    println!("  small-harness --eval <fixture>       Run an agent eval fixture and exit");
-    println!("  small-harness --continue           Resume the most recent session here");
-    println!("  small-harness completions <shell>  Print a completion script (bash|zsh|fish)");
+    println!("  albatross                      Start an interactive session");
+    println!("  albatross --print <text>       Run one prompt and exit (also reads stdin)");
+    println!("  albatross --eval <fixture>       Run an agent eval fixture and exit");
+    println!("  albatross --continue           Resume the most recent session here");
+    println!("  albatross completions <shell>  Print a completion script (bash|zsh|fish)");
     println!();
     println!("FLAGS:");
     println!("  --allow-tools, --yes   Auto-approve tool calls in one-shot mode");
@@ -248,8 +248,8 @@ fn run_completions(shell: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-const COMPLETIONS_BASH: &str = r#"# small-harness bash completion
-_small_harness() {
+const COMPLETIONS_BASH: &str = r#"# albatross bash completion
+_albatross() {
     local cur prev
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -264,13 +264,13 @@ _small_harness() {
         return 0
     fi
 }
-complete -F _small_harness small-harness
+complete -F _albatross albatross
 "#;
 
-const COMPLETIONS_ZSH: &str = r#"#compdef small-harness
-# small-harness zsh completion
+const COMPLETIONS_ZSH: &str = r#"#compdef albatross
+# albatross zsh completion
 
-_small_harness() {
+_albatross() {
     local -a opts
     opts=(
         '--print[Run one-shot with prompt]:prompt'
@@ -284,16 +284,16 @@ _small_harness() {
     _arguments $opts
 }
 
-compdef _small_harness small-harness
+compdef _albatross albatross
 "#;
 
-const COMPLETIONS_FISH: &str = r#"# small-harness fish completion
-complete -c small-harness -l print -s p -d 'Run one-shot with prompt'
-complete -c small-harness -l continue -s c -d 'Resume the latest session'
-complete -c small-harness -l allow-tools -d 'Auto-approve tool calls in one-shot mode'
-complete -c small-harness -l yes -d 'Auto-approve tool calls in one-shot mode'
-complete -c small-harness -n '__fish_use_subcommand' -a completions -d 'Emit a shell completion script'
-complete -c small-harness -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish' -d 'Shell flavor'
+const COMPLETIONS_FISH: &str = r#"# albatross fish completion
+complete -c albatross -l print -s p -d 'Run one-shot with prompt'
+complete -c albatross -l continue -s c -d 'Resume the latest session'
+complete -c albatross -l allow-tools -d 'Auto-approve tool calls in one-shot mode'
+complete -c albatross -l yes -d 'Auto-approve tool calls in one-shot mode'
+complete -c albatross -n '__fish_use_subcommand' -a completions -d 'Emit a shell completion script'
+complete -c albatross -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish' -d 'Shell flavor'
 "#;
 
 /// Returns true if the user passed `--continue` or `-c`. Only consulted when
@@ -586,8 +586,8 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
 fn load_runtime_hooks(
     config: &crate::config::AgentConfig,
 ) -> anyhow::Result<crate::hooks::HookRegistry> {
-    let managed_env = std::env::var("SMALL_HARNESS_MANAGED_HOOKS_JSON").ok();
-    let managed_file = std::env::var("SMALL_HARNESS_MANAGED_HOOKS_FILE").ok();
+    let managed_env = std::env::var("ALBATROSS_MANAGED_HOOKS_JSON").ok();
+    let managed_file = std::env::var("ALBATROSS_MANAGED_HOOKS_FILE").ok();
     let managed =
         crate::hooks::load_managed_hooks_from_env(managed_env.as_deref(), managed_file.as_deref())?;
     let hook_state = match hook_state_file_path() {
@@ -669,7 +669,7 @@ async fn main() -> anyhow::Result<()> {
     // validate a backend (otherwise `--version` fails when no API key is set).
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("small-harness {}", env!("CARGO_PKG_VERSION"));
+        println!("albatross {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -690,7 +690,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if !std::io::stdin().is_terminal() {
         eprintln!(
-            "small-harness requires an interactive TTY (run it directly in a terminal, not piped)."
+            "albatross requires an interactive TTY (run it directly in a terminal, not piped)."
         );
         std::process::exit(1);
     }

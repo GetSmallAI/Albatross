@@ -278,7 +278,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 pub fn render_markdown(entries: &[SessionEntry]) -> String {
-    let mut out = String::from("# Small Harness Session\n\n");
+    let mut out = String::from("# Albatross Session\n\n");
     for entry in entries {
         match &entry.message {
             ChatMessage::System { content } => {

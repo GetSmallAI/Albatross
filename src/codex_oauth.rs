@@ -88,6 +88,8 @@ fn authorization_url(state: &str, challenge: &str) -> String {
         ("state", state),
         ("id_token_add_organizations", "true"),
         ("codex_cli_simplified_flow", "true"),
+        // Deliberately still the pre-rename name: this identifies the client to
+        // the Codex backend, so it changes only alongside a live auth test.
         ("originator", "small-harness"),
     ];
     format!("{AUTHORIZE_URL}?{}", form_urlencoded(&params))

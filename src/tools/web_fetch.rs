@@ -62,7 +62,7 @@ impl Tool for WebFetchTool {
             .get(&args.url)
             .header(
                 "User-Agent",
-                concat!("small-harness/", env!("CARGO_PKG_VERSION")),
+                concat!("albatross/", env!("CARGO_PKG_VERSION")),
             )
             .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
             .send()

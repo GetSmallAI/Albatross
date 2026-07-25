@@ -520,7 +520,7 @@ pub async fn summarize_transcript(
     }))?;
     let messages = vec![
         ChatMessage::System {
-            content: "Update this Small Harness conversation summary for continuing context. Preserve durable goals, decisions, files touched, errors, and pending work. Fold the existing summary and new messages into one concise summary without duplicating details.".into(),
+            content: "Update this Albatross conversation summary for continuing context. Preserve durable goals, decisions, files touched, errors, and pending work. Fold the existing summary and new messages into one concise summary without duplicating details.".into(),
         },
         ChatMessage::User {
             content: transcript.into(),

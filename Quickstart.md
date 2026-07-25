@@ -1,8 +1,8 @@
-# Small Harness Quickstart
+# Albatross Quickstart
 
-This guide is for the first 20 minutes with Small Harness. It focuses on the
+This guide is for the first 20 minutes with Albatross. It focuses on the
 top things you can do immediately: try a bundled demo, fix failing tests on
-your repo, understand a codebase, make a safe edit, and tune Small Harness to
+your repo, understand a codebase, make a safe edit, and tune Albatross to
 the best model available on your machine.
 
 ## Before You Start
@@ -16,7 +16,7 @@ brew services start ollama
 ollama pull qwen2.5-coder:7b
 ```
 
-Then run Small Harness from the project you want to work in:
+Then run Albatross from the project you want to work in:
 
 ```bash
 cargo run --release
@@ -41,7 +41,7 @@ Pull a 7B coder and run a bundled demo — no repo setup required:
 /play fix-failing-test
 ```
 
-Small Harness copies a tiny Rust crate with a failing test into
+Albatross copies a tiny Rust crate with a failing test into
 `.sessions/play/`, switches to ship mode, and runs the agent live. You approve
 edits (or pass `--yolo` to auto-approve). When it finishes, you get a scorecard
 showing whether tests pass.
@@ -70,7 +70,7 @@ Compare two local models on the same demo:
 
 ## 1. Understand A Codebase Fast
 
-Small Harness is most useful when you let it inspect files directly instead of
+Albatross is most useful when you let it inspect files directly instead of
 pasting code into chat. Start with a broad map, then ask narrower questions.
 
 Build the local project memory index first:
@@ -107,14 +107,14 @@ Useful commands:
 
 What to look for:
 
-- Small Harness should use read/search/list tools only when needed.
+- Albatross should use read/search/list tools only when needed.
 - For repo/code questions, `repo_search` should help it find likely files fast.
 - With `toolSelection: "auto"`, ordinary chat should avoid sending tool schemas.
 - The answer should cite concrete files and functions, not just guess.
 
 ## 2. Make A Safe Local Edit
 
-Small Harness can edit files, but the best workflow is to ask for a small,
+Albatross can edit files, but the best workflow is to ask for a small,
 reviewable change and let approvals show you exactly what will happen.
 
 Try:
@@ -183,7 +183,7 @@ Good habits:
 
 ## 3. Tune The Best Local Model
 
-Different local models vary a lot. Small Harness can probe model capabilities,
+Different local models vary a lot. Albatross can probe model capabilities,
 cache the results, benchmark latency, and recommend the best cached fit.
 
 Everything lives under `/doctor`. Start with a hardware-aware recommendation:
@@ -225,7 +225,7 @@ Apply the recommendation to the current session:
 /doctor recommend apply
 ```
 
-What Small Harness is checking:
+What Albatross is checking:
 
 - local chip, architecture, memory, and CPU counts
 - model listing
@@ -244,7 +244,7 @@ compete with local models, use:
 ```
 
 Long coding sessions on small local models can fill the context window quickly.
-Small Harness auto-compacts older turns on local backends when usage crosses
+Albatross auto-compacts older turns on local backends when usage crosses
 ~85% of the effective limit (run `/context` to see headroom). Compaction keeps
 complete tool-call rounds intact so the transcript stays valid for the next
 request. Use `/compact` manually if you want to shrink sooner. One-shot
@@ -252,7 +252,7 @@ request. Use `/compact` manually if you want to shrink sooner. One-shot
 
 ## Scripts And CI
 
-Use one-shot mode when you want Small Harness without the interactive TUI:
+Use one-shot mode when you want Albatross without the interactive TUI:
 
 ```bash
 cargo run --release -- --print "Summarize the repo entry points"
@@ -382,7 +382,7 @@ cargo test
 
 ## Where Things Are Saved
 
-Small Harness keeps local state under `.sessions/`:
+Albatross keeps local state under `.sessions/`:
 
 ```text
 .sessions/

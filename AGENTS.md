@@ -26,8 +26,8 @@ Summary:
 3. Push `main`, create and push tag `vX.Y.Z`, watch
    [`.github/workflows/release.yml`](.github/workflows/release.yml).
 4. Verify: `gh release view vX.Y.Z` (release exists, macOS assets present).
-5. Verify Homebrew tap: `GetSmallAI/homebrew-tap` → `Formula/small-harness.rb`
-   matches the version. Optionally test `brew upgrade small-harness`.
+5. Verify Homebrew tap: `GetSmallAI/homebrew-tap` → `Formula/albatross.rb`
+   matches the version. Optionally test `brew upgrade albatross`.
 
 Do not mark release work complete until step 4 succeeds.
 

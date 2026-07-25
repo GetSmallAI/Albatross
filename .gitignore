@@ -2,8 +2,8 @@ target/
 .sessions/
 # Ephemeral run artifacts (embed working-tree diffs / conversation handoffs).
 # Committable project config (prompt.md, spec.md, rubric.md) is intentionally NOT ignored.
-.small-harness/continue.md
-.small-harness/auto-report.md
+.albatross/continue.md
+.albatross/auto-report.md
 .env
 .env.local
 *.log

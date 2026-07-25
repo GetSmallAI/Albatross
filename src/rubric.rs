@@ -4,7 +4,7 @@
 //! harness — not the model — computes the weighted total and pass/fail against
 //! the threshold, so a critic that over-rates its own totals can't push weak
 //! work over the bar. A project can override the criteria by dropping a
-//! `.small-harness/rubric.md` with `## Name (weight: N)` sections; otherwise
+//! `.albatross/rubric.md` with `## Name (weight: N)` sections; otherwise
 //! [`default_criteria`] is used. The pass threshold always comes from config.
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ pub fn default_rubric(pass_threshold: f32) -> Rubric {
 }
 
 /// Load the rubric for a workspace. Reads `path` (or
-/// `<workspace>/.small-harness/rubric.md` when `path` is None); falls back to
+/// `<workspace>/.albatross/rubric.md` when `path` is None); falls back to
 /// [`default_criteria`] when the file is missing or has no parseable
 /// `## Name (weight: N)` sections. The full file text, when present, is kept as
 /// `guidance` and embedded into the critic prompt. `pass_threshold` always
@@ -103,7 +103,7 @@ pub fn load_rubric(workspace_root: &str, pass_threshold: f32, path: Option<&str>
     let rubric_path: PathBuf = match path {
         Some(p) => PathBuf::from(p),
         None => Path::new(workspace_root)
-            .join(".small-harness")
+            .join(".albatross")
             .join("rubric.md"),
     };
     let Ok(raw) = std::fs::read_to_string(&rubric_path) else {
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn load_rubric_reads_custom_file_and_keeps_guidance() {
         let dir = tempfile::tempdir().unwrap();
-        let sh = dir.path().join(".small-harness");
+        let sh = dir.path().join(".albatross");
         std::fs::create_dir_all(&sh).unwrap();
         std::fs::write(
             sh.join("rubric.md"),

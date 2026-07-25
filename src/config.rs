@@ -381,7 +381,7 @@ pub struct RubricConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Override path to the rubric markdown; defaults to
-    /// `<workspace>/.small-harness/rubric.md`.
+    /// `<workspace>/.albatross/rubric.md`.
     #[serde(rename = "rubricPath", default)]
     pub rubric_path: Option<String>,
     /// Pass threshold on the 0-10 weighted scale.
@@ -1345,7 +1345,7 @@ pub fn load_config() -> AgentConfig {
             config.tool_selection = selection;
         }
     }
-    if let Some(s) = layered_env(&dotenv, "SMALL_HARNESS_MODE") {
+    if let Some(s) = layered_env(&dotenv, "ALBATROSS_MODE") {
         if let Some(mode) = OperatorMode::parse(&s) {
             config.apply_operator_mode(mode);
         }
@@ -1421,13 +1421,13 @@ mod tests {
     #[test]
     fn process_env_wins_over_dotenv_values() {
         let mut dotenv = BTreeMap::new();
-        dotenv.insert("SMALL_HARNESS_TEST_LAYER".into(), "dotenv".into());
-        std::env::set_var("SMALL_HARNESS_TEST_LAYER", "process");
+        dotenv.insert("ALBATROSS_TEST_LAYER".into(), "dotenv".into());
+        std::env::set_var("ALBATROSS_TEST_LAYER", "process");
         assert_eq!(
-            layered_env(&dotenv, "SMALL_HARNESS_TEST_LAYER").as_deref(),
+            layered_env(&dotenv, "ALBATROSS_TEST_LAYER").as_deref(),
             Some("process")
         );
-        std::env::remove_var("SMALL_HARNESS_TEST_LAYER");
+        std::env::remove_var("ALBATROSS_TEST_LAYER");
     }
 
     #[test]

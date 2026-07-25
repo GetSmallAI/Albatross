@@ -21,7 +21,7 @@ const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const YELLOW: crate::theme::Style = crate::theme::WARN;
 const RED: crate::theme::Style = crate::theme::ERROR;
 
-const NO_WIZARD_ENV: &str = "SMALL_HARNESS_NO_WIZARD";
+const NO_WIZARD_ENV: &str = "ALBATROSS_NO_WIZARD";
 
 pub fn setup_disabled() -> bool {
     let dotenv = dotenv_values();
@@ -49,7 +49,7 @@ pub async fn maybe_run_first_run_setup(base: &AgentConfig) -> Result<Option<Agen
 pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>> {
     let pad = crate::theme::PAD;
     println!();
-    println!("{pad}{CYAN}{BOLD}Small Harness setup{RESET}");
+    println!("{pad}{CYAN}{BOLD}Albatross setup{RESET}");
     println!("{}", crate::theme::rule());
     println!(
         "{pad}{DIM}A few quick questions — I'll write {AGENT_CONFIG_PATH}. Use ↑/↓ and Enter\n{pad}(or a number); defaults are marked {CYAN}*{RESET}{DIM}. Type q to cancel.{RESET}"

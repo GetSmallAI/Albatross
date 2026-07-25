@@ -222,7 +222,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Summarize or trim older conversation turns"),
     (
         "/reset",
-        "Reset context: write a continuation handoff (.small-harness/continue.md) and start fresh",
+        "Reset context: write a continuation handoff (.albatross/continue.md) and start fresh",
     ),
     (
         "/doctor",
@@ -347,7 +347,7 @@ pub fn command_list() -> Vec<(String, String)> {
         .iter()
         .map(|(n, d)| ((*n).to_string(), (*d).to_string()))
         .collect();
-    cmds.push(("/exit".to_string(), "Quit Small Harness".to_string()));
+    cmds.push(("/exit".to_string(), "Quit Albatross".to_string()));
     cmds.push(("/quit".to_string(), "Quit (alias for /exit)".to_string()));
     cmds.sort_by(|a, b| a.0.cmp(&b.0));
     cmds.dedup_by(|a, b| a.0 == b.0);
@@ -358,10 +358,7 @@ fn help() {
     for (n, d) in COMMANDS {
         println!("  {CYAN}{:<12}{RESET} {DIM}{}{RESET}", n, d);
     }
-    println!(
-        "  {CYAN}{:<12}{RESET} {DIM}Quit Small Harness{RESET}",
-        "/exit"
-    );
+    println!("  {CYAN}{:<12}{RESET} {DIM}Quit Albatross{RESET}", "/exit");
     println!(
         "  {CYAN}{:<12}{RESET} {DIM}Quit (alias for /exit){RESET}",
         "/quit"
@@ -621,11 +618,11 @@ struct PlanExecuteArgs {
 }
 
 /// Parse `/plan` arguments. Returns `None` to print usage.
-///   `/plan <intent>`                 → draft to `.small-harness/spec.md`
+///   `/plan <intent>`                 → draft to `.albatross/spec.md`
 ///   `/plan <intent> --export <path>` → draft to `<path>` instead
 ///   `/plan show`                     → print the saved spec
 ///   `/plan validate`                 → check the spec's Done Criteria vs the diff
-///   `/plan route <intent>`           → draft `.small-harness/plan.json`
+///   `/plan route <intent>`           → draft `.albatross/plan.json`
 ///   `/plan status`                   → show routed plan status
 ///   `/plan execute`                  → execute ready routed-plan tasks
 fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
@@ -1240,7 +1237,7 @@ fn next_ready_task_index(plan: &RoutedPlan) -> Option<usize> {
 
 fn render_routed_task_prompt(plan: &RoutedPlan, task: &RoutedPlanTask) -> String {
     let mut out = String::new();
-    out.push_str("Execute one task from a Small Harness routed plan.\n\n");
+    out.push_str("Execute one task from a Albatross routed plan.\n\n");
     out.push_str("Overall goal:\n");
     out.push_str(&plan.goal);
     out.push_str("\n\nTask:\n");
@@ -1712,7 +1709,7 @@ mod tests {
             .await
             .unwrap();
 
-        let body = fs::read_to_string(dir.path().join(".small-harness/spec.md")).unwrap();
+        let body = fs::read_to_string(dir.path().join(".albatross/spec.md")).unwrap();
         for section in [
             "## Goal",
             "## User Outcomes",
@@ -1748,7 +1745,7 @@ mod tests {
         .unwrap();
 
         assert!(out_path.exists());
-        assert!(!dir.path().join(".small-harness/spec.md").exists());
+        assert!(!dir.path().join(".albatross/spec.md").exists());
         assert!(fs::read_to_string(out_path)
             .unwrap()
             .contains("## Done Criteria"));
@@ -1759,6 +1756,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = test_state(dir.path());
         cmd_plan("show", &mut state).await.unwrap();
-        assert!(!dir.path().join(".small-harness/spec.md").exists());
+        assert!(!dir.path().join(".albatross/spec.md").exists());
     }
 }

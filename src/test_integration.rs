@@ -757,9 +757,9 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
         Command::new("git")
             .args([
                 "-c",
-                "user.name=Small Harness",
+                "user.name=Albatross",
                 "-c",
-                "user.email=small-harness@example.invalid",
+                "user.email=albatross@example.invalid",
                 "commit",
                 "-m",
                 "baseline",

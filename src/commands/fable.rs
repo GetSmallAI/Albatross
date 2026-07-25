@@ -38,6 +38,6 @@ pub(super) fn cmd_fable(args: &str, state: &AppState) -> Result<()> {
 fn print_fable_usage() {
     println!("  {DIM}Usage: /fable [show|usage|current|path|help]{RESET}");
     println!(
-        "  {DIM}Tracks Small Harness turns whose model id matches fable.fableModelMatches (default: `fable`).{RESET}"
+        "  {DIM}Tracks Albatross turns whose model id matches fable.fableModelMatches (default: `fable`).{RESET}"
     );
 }

@@ -1,15 +1,15 @@
 [package]
-name = "small-harness"
+name = "albatross"
 version = "1.2.7"
 edition = "2021"
 description = "Terminal-based agent harness for running small LLMs on your Mac"
 license = "MIT"
-repository = "https://github.com/GetSmallAI/SmallHarness"
-homepage = "https://github.com/GetSmallAI/SmallHarness"
+repository = "https://github.com/GetSmallAI/Albatross"
+homepage = "https://github.com/GetSmallAI/Albatross"
 readme = "README.md"
 
 [[bin]]
-name = "small-harness"
+name = "albatross"
 path = "src/main.rs"
 
 [dependencies]

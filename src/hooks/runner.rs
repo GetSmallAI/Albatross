@@ -238,19 +238,19 @@ fn apply_hook_env(
         command.env(key, value);
     }
     if let Some(event) = payload.get("hook_event_name").and_then(Value::as_str) {
-        command.env("SMALL_HARNESS_HOOK_EVENT", event);
+        command.env("ALBATROSS_HOOK_EVENT", event);
     }
     if let Some(session_id) = payload.get("session_id").and_then(Value::as_str) {
-        command.env("SMALL_HARNESS_SESSION_ID", session_id);
+        command.env("ALBATROSS_SESSION_ID", session_id);
     }
     if let Some(turn_id) = payload.get("turn_id").and_then(Value::as_u64) {
-        command.env("SMALL_HARNESS_TURN_ID", turn_id.to_string());
+        command.env("ALBATROSS_TURN_ID", turn_id.to_string());
     }
     if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
-        command.env("SMALL_HARNESS_TRANSCRIPT_PATH", path);
+        command.env("ALBATROSS_TRANSCRIPT_PATH", path);
     }
     if let Some(path) = payload.get("events_path").and_then(Value::as_str) {
-        command.env("SMALL_HARNESS_EVENTS_PATH", path);
+        command.env("ALBATROSS_EVENTS_PATH", path);
     }
 }
 

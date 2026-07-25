@@ -33,7 +33,7 @@ async fn cmd_doctor_probe(args: &str, state: &AppState) -> Result<()> {
         return cmd_doctor_deep(state, all).await;
     }
 
-    println!("  {BOLD}Small Harness doctor{RESET}");
+    println!("  {BOLD}Albatross doctor{RESET}");
     println!(
         "  {DIM}backend{RESET} {} · {}",
         state.config.backend.as_str(),
@@ -464,7 +464,7 @@ fn print_capability_table(rows: &[DoctorCapabilityRow]) {
 
 fn render_doctor_markdown(report: &DoctorCapabilityReport) -> String {
     let mut out = format!(
-        "# Small Harness Doctor Report\n\nGenerated: `{}`\n\nActive backend: `{}`\n\n",
+        "# Albatross Doctor Report\n\nGenerated: `{}`\n\nActive backend: `{}`\n\n",
         report.generated_at, report.active_backend
     );
     out.push_str("| Backend | Models | Streaming | Usage | Tool Calls | Warning |\n");
@@ -512,7 +512,7 @@ fn save_doctor_report(
 }
 
 async fn cmd_doctor_deep(state: &AppState, all: bool) -> Result<()> {
-    println!("  {BOLD}Small Harness doctor --deep{RESET}");
+    println!("  {BOLD}Albatross doctor --deep{RESET}");
     println!(
         "  {DIM}probing OpenAI-compatible model, stream, usage, and tool-call behavior{RESET}"
     );

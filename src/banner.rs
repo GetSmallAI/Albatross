@@ -53,7 +53,7 @@ pub fn print_banner(info: BannerInfo<'_>) {
     print!("{}", gradient_logo());
     println!();
     println!(
-        "{PAD}{BOLD}Small Harness v{}{RESET}  {MUTED}— a small, terminal-first coding harness{RESET}",
+        "{PAD}{BOLD}Albatross v{}{RESET}  {MUTED}— a small, terminal-first coding harness{RESET}",
         env!("CARGO_PKG_VERSION")
     );
     println!("{}", row("backend", info.backend));

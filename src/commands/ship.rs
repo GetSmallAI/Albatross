@@ -663,7 +663,7 @@ fn latest_commit_subject(workspace_root: &str) -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Ship Small Harness changes".into())
+        .unwrap_or_else(|| "Ship Albatross changes".into())
 }
 
 fn pr_commit_summary(workspace_root: &str, target: &ShipPrTarget) -> String {
@@ -687,7 +687,7 @@ fn render_ship_pr_body(
 ) -> String {
     let mut out = String::new();
     out.push_str("## Summary\n\n");
-    out.push_str("- Prepared by Small Harness `/ship pr`.\n");
+    out.push_str("- Prepared by Albatross `/ship pr`.\n");
     out.push_str(&format!("- Head: `{}`\n", target.head_branch));
     out.push_str(&format!("- Base: `{}`\n", target.base_branch));
     out.push_str(&format!("- Commit: `{commit_hash}`\n\n"));
@@ -1378,7 +1378,7 @@ fn write_ship_commit_record(
     }
 
     let mut out = String::new();
-    out.push_str("# Small Harness Ship Commit\n\n");
+    out.push_str("# Albatross Ship Commit\n\n");
     out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
     out.push_str("## Git\n\n");
     out.push_str(&format!("- Branch: `{}`\n", staged_snapshot.branch_label()));
@@ -1439,7 +1439,7 @@ fn write_ship_push_record(
     }
 
     let mut out = String::new();
-    out.push_str("# Small Harness Ship Push\n\n");
+    out.push_str("# Albatross Ship Push\n\n");
     out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
     out.push_str("## Git\n\n");
     out.push_str(&format!("- Branch: `{}`\n", snapshot.branch_label()));
@@ -1485,7 +1485,7 @@ fn write_ship_pr_record(session_dir: &str, record: &ShipPrRecord<'_>) -> Result<
     }
 
     let mut out = String::new();
-    out.push_str("# Small Harness Ship PR\n\n");
+    out.push_str("# Albatross Ship PR\n\n");
     out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
     out.push_str("## GitHub\n\n");
     out.push_str(&format!("- Status: `{}`\n", record.status));
@@ -2116,7 +2116,7 @@ mod tests {
         .unwrap();
         let body = fs::read_to_string(path).unwrap();
 
-        assert!(body.contains("# Small Harness Ship Commit"));
+        assert!(body.contains("# Albatross Ship Commit"));
         assert!(body.contains("feat: test ship record"));
         assert!(body.contains("abc1234"));
         assert!(body.contains("Final Staged Diff Stat"));
@@ -2227,7 +2227,7 @@ mod tests {
         .unwrap();
         let body = fs::read_to_string(path).unwrap();
 
-        assert!(body.contains("# Small Harness Ship Push"));
+        assert!(body.contains("# Albatross Ship Push"));
         assert!(body.contains("abc1234"));
         assert!(body.contains("pushed"));
         assert!(body.contains("Set upstream"));
@@ -2236,16 +2236,16 @@ mod tests {
     #[test]
     fn parses_github_remote_urls() {
         assert_eq!(
-            parse_github_repo("https://github.com/GetSmallAI/SmallHarness.git").as_deref(),
-            Some("GetSmallAI/SmallHarness")
+            parse_github_repo("https://github.com/GetSmallAI/Albatross.git").as_deref(),
+            Some("GetSmallAI/Albatross")
         );
         assert_eq!(
-            parse_github_repo("git@github.com:GetSmallAI/SmallHarness.git").as_deref(),
-            Some("GetSmallAI/SmallHarness")
+            parse_github_repo("git@github.com:GetSmallAI/Albatross.git").as_deref(),
+            Some("GetSmallAI/Albatross")
         );
         assert_eq!(
-            parse_github_repo("ssh://git@github.com/GetSmallAI/SmallHarness.git").as_deref(),
-            Some("GetSmallAI/SmallHarness")
+            parse_github_repo("ssh://git@github.com/GetSmallAI/Albatross.git").as_deref(),
+            Some("GetSmallAI/Albatross")
         );
         assert!(parse_github_repo("https://example.com/x/y.git").is_none());
     }
@@ -2260,7 +2260,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:GetSmallAI/SmallHarness.git",
+                "git@github.com:GetSmallAI/Albatross.git",
             ],
         );
         let mut snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
@@ -2270,7 +2270,7 @@ mod tests {
         let target =
             resolve_ship_pr_target(dir.path().to_str().unwrap(), &snapshot, Some("main")).unwrap();
 
-        assert_eq!(target.repo, "GetSmallAI/SmallHarness");
+        assert_eq!(target.repo, "GetSmallAI/Albatross");
         assert_eq!(target.head_branch, "feature");
         assert_eq!(target.base_branch, "main");
     }
@@ -2279,7 +2279,7 @@ mod tests {
     fn build_gh_pr_command_adds_draft_by_default() {
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/SmallHarness".into(),
+            repo: "GetSmallAI/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2297,7 +2297,7 @@ mod tests {
     fn build_gh_pr_status_command_uses_open_head_filter() {
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/SmallHarness".into(),
+            repo: "GetSmallAI/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2318,7 +2318,7 @@ mod tests {
         let snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/SmallHarness".into(),
+            repo: "GetSmallAI/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2337,7 +2337,7 @@ mod tests {
         let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/SmallHarness".into(),
+            repo: "GetSmallAI/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2351,16 +2351,16 @@ mod tests {
                 title: "Title",
                 body: "Body",
                 command: &command,
-                url: Some("https://github.com/GetSmallAI/SmallHarness/pull/1"),
+                url: Some("https://github.com/GetSmallAI/Albatross/pull/1"),
                 status: "created",
             },
         )
         .unwrap();
         let body = fs::read_to_string(path).unwrap();
 
-        assert!(body.contains("# Small Harness Ship PR"));
-        assert!(body.contains("GetSmallAI/SmallHarness"));
-        assert!(body.contains("https://github.com/GetSmallAI/SmallHarness/pull/1"));
+        assert!(body.contains("# Albatross Ship PR"));
+        assert!(body.contains("GetSmallAI/Albatross"));
+        assert!(body.contains("https://github.com/GetSmallAI/Albatross/pull/1"));
         assert!(body.contains("gh pr create"));
     }
 
@@ -2368,7 +2368,7 @@ mod tests {
     fn parse_ship_pr_status_json_handles_open_pr_checks() {
         let json = r#"[{
             "number": 7,
-            "url": "https://github.com/GetSmallAI/SmallHarness/pull/7",
+            "url": "https://github.com/GetSmallAI/Albatross/pull/7",
             "title": "Ship status",
             "state": "OPEN",
             "headRefName": "feature",

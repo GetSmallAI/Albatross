@@ -63,8 +63,8 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         .map(|(_, env)| *env)
 }
 
-/// `$XDG_CONFIG_HOME/small-harness/auth.json`, falling back to
-/// `~/.config/small-harness/auth.json`. Returns `None` when neither
+/// `$XDG_CONFIG_HOME/albatross/auth.json`, falling back to
+/// `~/.config/albatross/auth.json`. Returns `None` when neither
 /// XDG_CONFIG_HOME nor HOME is set (`None` means "no persistence layer
 /// available," not an error).
 pub fn auth_file_path() -> Option<PathBuf> {
@@ -75,7 +75,7 @@ pub fn auth_file_path() -> Option<PathBuf> {
     } else {
         return None;
     };
-    Some(base.join("small-harness").join("auth.json"))
+    Some(base.join("albatross").join("auth.json"))
 }
 
 impl AuthStore {
