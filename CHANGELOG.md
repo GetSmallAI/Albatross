@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-25
+
 ### Changed
 
 - **Renamed from Small Harness to Albatross.** The binary is now `albatross`,
