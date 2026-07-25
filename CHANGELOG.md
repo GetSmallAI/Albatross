@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-07-25
+
+### Changed
+
+- **Moved off the GetSmallAI org onto personal ownership.** The source repo is
+  now [morganlinton/Albatross](https://github.com/morganlinton/Albatross), and
+  Homebrew installs with `brew install morganlinton/tap/albatross`. Old
+  `GetSmallAI/*` GitHub URLs redirect. If you previously tapped
+  `getsmallai/tap`, retap:
+
+  ```
+  brew untap getsmallai/tap
+  brew install morganlinton/tap/albatross
+  ```
+
 ## [2.0.1] - 2026-07-25
 
 ### Fixed

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/GetSmallAI/Albatross/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/morganlinton/Albatross/releases/latest";
 const USER_AGENT: &str = concat!("albatross/", env!("CARGO_PKG_VERSION"));
 const CACHE_TTL_HOURS: i64 = 24;
 const HTTP_TIMEOUT_SECS: u64 = 4;
@@ -78,7 +78,7 @@ pub fn pending_notice(current: &str) -> Option<String> {
     let cache = read_cache(&path)?;
     if version_is_newer(&cache.latest_version, current) {
         Some(format!(
-            "Update available: {} → {} (https://github.com/GetSmallAI/Albatross/releases/latest)",
+            "Update available: {} → {} (https://github.com/morganlinton/Albatross/releases/latest)",
             current, cache.latest_version
         ))
     } else {

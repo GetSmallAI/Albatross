@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/GetSmallAI/Albatross/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/Albatross/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-2.0.1-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
@@ -78,13 +78,13 @@ few that aren't usual:
 **Homebrew (macOS):**
 
 ```bash
-brew install getsmallai/tap/albatross
+brew install morganlinton/tap/albatross
 ```
 
 **From source** (Rust 1.75+):
 
 ```bash
-git clone https://github.com/GetSmallAI/Albatross.git
+git clone https://github.com/morganlinton/Albatross.git
 cd Albatross
 cargo build --release    # binary at target/release/albatross
 ```

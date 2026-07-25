@@ -46,7 +46,7 @@ Typical pattern (see `chore: release 1.0.2` on `main`):
    ```
 4. **Watch** [`.github/workflows/release.yml`](../.github/workflows/release.yml)
    — triggered by `push` of `v*` tags. It builds macOS artifacts, creates the
-   GitHub Release, and updates `GetSmallAI/homebrew-tap` when
+   GitHub Release, and updates `morganlinton/homebrew-tap` when
    `TAP_GITHUB_TOKEN` is set.
 5. **Verify release**:
    ```bash
@@ -55,7 +55,7 @@ Typical pattern (see `chore: release 1.0.2` on `main`):
    ```
    Confirm macOS `.tar.gz` assets and `SHA256SUMS` on the release page.
 6. **Verify Homebrew tap** (when token configured):
-   - `GetSmallAI/homebrew-tap` → `Formula/albatross.rb` shows `version "X.Y.Z"`.
+   - `morganlinton/homebrew-tap` → `Formula/albatross.rb` shows `version "X.Y.Z"`.
    - Optionally: `brew upgrade albatross` from a machine using the tap.
 
 ## If something fails

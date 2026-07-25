@@ -2254,7 +2254,8 @@ mod tests {
         let ScorecardEvent::Pr(mut pr) = quality_pr(day, 1000, title, 92, true) else {
             unreachable!();
         };
-        pr.url = Some("https://github.com/GetSmallAI/Albatross/pull/42/files?check_suite=1".into());
+        pr.url =
+            Some("https://github.com/morganlinton/Albatross/pull/42/files?check_suite=1".into());
         ScorecardEvent::Pr(pr)
     }
 
@@ -2264,7 +2265,7 @@ mod tests {
             pr_timestamp: pr.timestamp.clone(),
             source: "github".into(),
             url: pr.url.clone().unwrap(),
-            repo: "GetSmallAI/Albatross".into(),
+            repo: "morganlinton/Albatross".into(),
             number: 42,
             title: pr.title.clone(),
             state: "OPEN".into(),
@@ -2374,15 +2375,15 @@ mod tests {
     #[test]
     fn parses_github_pr_urls_for_remote_verification() {
         let parsed = parse_github_pr_url(
-            "https://github.com/GetSmallAI/Albatross/pull/42/files?check_suite=1#summary",
+            "https://github.com/morganlinton/Albatross/pull/42/files?check_suite=1#summary",
         )
         .unwrap();
 
-        assert_eq!(parsed.repo, "GetSmallAI/Albatross");
+        assert_eq!(parsed.repo, "morganlinton/Albatross");
         assert_eq!(parsed.number, 42);
         assert_eq!(
             parsed.url,
-            "https://github.com/GetSmallAI/Albatross/pull/42"
+            "https://github.com/morganlinton/Albatross/pull/42"
         );
         assert!(parse_github_pr_url("https://example.com/a/b/pull/1").is_none());
     }
@@ -2395,7 +2396,7 @@ mod tests {
         };
         let json = r#"{
             "number": 42,
-            "url": "https://github.com/GetSmallAI/Albatross/pull/42",
+            "url": "https://github.com/morganlinton/Albatross/pull/42",
             "title": "remote status",
             "state": "OPEN",
             "isDraft": false,

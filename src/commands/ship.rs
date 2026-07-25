@@ -2236,16 +2236,16 @@ mod tests {
     #[test]
     fn parses_github_remote_urls() {
         assert_eq!(
-            parse_github_repo("https://github.com/GetSmallAI/Albatross.git").as_deref(),
-            Some("GetSmallAI/Albatross")
+            parse_github_repo("https://github.com/morganlinton/Albatross.git").as_deref(),
+            Some("morganlinton/Albatross")
         );
         assert_eq!(
-            parse_github_repo("git@github.com:GetSmallAI/Albatross.git").as_deref(),
-            Some("GetSmallAI/Albatross")
+            parse_github_repo("git@github.com:morganlinton/Albatross.git").as_deref(),
+            Some("morganlinton/Albatross")
         );
         assert_eq!(
-            parse_github_repo("ssh://git@github.com/GetSmallAI/Albatross.git").as_deref(),
-            Some("GetSmallAI/Albatross")
+            parse_github_repo("ssh://git@github.com/morganlinton/Albatross.git").as_deref(),
+            Some("morganlinton/Albatross")
         );
         assert!(parse_github_repo("https://example.com/x/y.git").is_none());
     }
@@ -2260,7 +2260,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:GetSmallAI/Albatross.git",
+                "git@github.com:morganlinton/Albatross.git",
             ],
         );
         let mut snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
@@ -2270,7 +2270,7 @@ mod tests {
         let target =
             resolve_ship_pr_target(dir.path().to_str().unwrap(), &snapshot, Some("main")).unwrap();
 
-        assert_eq!(target.repo, "GetSmallAI/Albatross");
+        assert_eq!(target.repo, "morganlinton/Albatross");
         assert_eq!(target.head_branch, "feature");
         assert_eq!(target.base_branch, "main");
     }
@@ -2279,7 +2279,7 @@ mod tests {
     fn build_gh_pr_command_adds_draft_by_default() {
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/Albatross".into(),
+            repo: "morganlinton/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2297,7 +2297,7 @@ mod tests {
     fn build_gh_pr_status_command_uses_open_head_filter() {
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/Albatross".into(),
+            repo: "morganlinton/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2318,7 +2318,7 @@ mod tests {
         let snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/Albatross".into(),
+            repo: "morganlinton/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2337,7 +2337,7 @@ mod tests {
         let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
         let target = ShipPrTarget {
             remote: "origin".into(),
-            repo: "GetSmallAI/Albatross".into(),
+            repo: "morganlinton/Albatross".into(),
             head_branch: "feature".into(),
             base_branch: "main".into(),
         };
@@ -2351,7 +2351,7 @@ mod tests {
                 title: "Title",
                 body: "Body",
                 command: &command,
-                url: Some("https://github.com/GetSmallAI/Albatross/pull/1"),
+                url: Some("https://github.com/morganlinton/Albatross/pull/1"),
                 status: "created",
             },
         )
@@ -2359,8 +2359,8 @@ mod tests {
         let body = fs::read_to_string(path).unwrap();
 
         assert!(body.contains("# Albatross Ship PR"));
-        assert!(body.contains("GetSmallAI/Albatross"));
-        assert!(body.contains("https://github.com/GetSmallAI/Albatross/pull/1"));
+        assert!(body.contains("morganlinton/Albatross"));
+        assert!(body.contains("https://github.com/morganlinton/Albatross/pull/1"));
         assert!(body.contains("gh pr create"));
     }
 
@@ -2368,7 +2368,7 @@ mod tests {
     fn parse_ship_pr_status_json_handles_open_pr_checks() {
         let json = r#"[{
             "number": 7,
-            "url": "https://github.com/GetSmallAI/Albatross/pull/7",
+            "url": "https://github.com/morganlinton/Albatross/pull/7",
             "title": "Ship status",
             "state": "OPEN",
             "headRefName": "feature",
