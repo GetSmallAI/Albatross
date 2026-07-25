@@ -13,8 +13,12 @@
 //! - **Guardrails.** A max-round ceiling, an optional dollar budget on generator
 //!   spend, and an optional wall-clock deadline. There is always a finite bound.
 //! - **A done-check.** When a `spec.md` (from `/plan`) supplies Done Criteria,
-//!   each round checks them against the working-tree diff — folding in a
-//!   lightweight spec-validator — so "done" means more than a single score.
+//!   a round that already clears the rubric threshold checks those criteria
+//!   against the working-tree diff — folding in a lightweight spec-validator —
+//!   so "done" means more than a single score. Failed-eval rounds skip the
+//!   extra LLM call (done-check cannot unblock stop until `passed` is true).
+//!   A run that never clears the threshold does one final check after the loop
+//!   so the report still shows which criteria the work actually met.
 //!
 //! Whatever the outcome, it leaves a morning report at
 //! `.small-harness/auto-report.md`.
@@ -330,9 +334,11 @@ pub async fn run_auto_loop(state: &mut AppState, opts: AutoOptions) -> Result<()
             reset_after: false,
         });
 
-        // --- done-check against spec criteria (only when they exist) ---
+        // --- done-check against spec criteria (only when eval already passed) ---
+        // Stop requires `passed && done_ok`. Running the LLM done-check on a
+        // failing rubric round cannot change the stop decision and wastes a call.
         let mut done_ok = true;
-        if !criteria.is_empty() {
+        if should_run_done_check(passed, criteria.len()) {
             let dc = run_done_check(state, &evaluator_model, &criteria, &diff).await;
             println!(
                 "  {DIM}done-check {}/{} criteria{RESET}",
@@ -376,6 +382,23 @@ pub async fn run_auto_loop(state: &mut AppState, opts: AutoOptions) -> Result<()
                 }
             }
         }
+    }
+
+    // The per-round check only runs once the rubric passes, so a run that never
+    // cleared the threshold reaches here with no criteria state — and the report
+    // would render every criterion unchecked, which reads as "nothing met"
+    // rather than "not measured". One check against the final tree fixes that
+    // while keeping the per-round saving.
+    let reported = run.last_done_check.is_some();
+    if should_run_final_done_check(reported, criteria.len(), run.stop_reason) {
+        let diff = collect_diff_context(&state.config.workspace_root);
+        let dc = run_done_check(state, &evaluator_model, &criteria, &diff).await;
+        println!(
+            "  {DIM}done-check {}/{} criteria (final){RESET}",
+            dc.met_count(),
+            dc.total()
+        );
+        run.last_done_check = Some(dc);
     }
 
     restore_iterate_mode(state, restore);
@@ -444,6 +467,24 @@ fn should_auto_reset(state: &AppState, reset_ratio: f64) -> bool {
         state.backend.is_local,
     );
     crate::budget::usage_ratio(&budget, limit) >= reset_ratio
+}
+
+/// Whether this round should spend an LLM call on Done Criteria.
+/// Only useful when the rubric already passed — otherwise stop stays false.
+pub(crate) fn should_run_done_check(passed: bool, criteria_len: usize) -> bool {
+    passed && criteria_len > 0
+}
+
+/// Whether the post-loop pass should spend one call to fill in criteria state
+/// for the report. Skipped when a round already reported, when there are no
+/// criteria, and on interrupt — a user who pressed Ctrl-C wants the run to end,
+/// not to wait on another model call.
+pub(crate) fn should_run_final_done_check(
+    already_reported: bool,
+    criteria_len: usize,
+    stop_reason: StopReason,
+) -> bool {
+    !already_reported && criteria_len > 0 && stop_reason != StopReason::Interrupted
 }
 
 /// Ask the evaluator which Done Criteria the current diff satisfies. Kept
@@ -1044,6 +1085,44 @@ mod tests {
             extract_spec_goal(spec),
             "Make the parser robust to bad input."
         );
+    }
+
+    #[test]
+    fn done_check_only_when_eval_passed_and_criteria_exist() {
+        assert!(!should_run_done_check(false, 3));
+        assert!(!should_run_done_check(true, 0));
+        assert!(!should_run_done_check(false, 0));
+        assert!(should_run_done_check(true, 2));
+    }
+
+    #[test]
+    fn final_done_check_fills_report_when_no_round_ran_one() {
+        // A run that never cleared the threshold has no criteria state yet.
+        assert!(should_run_final_done_check(false, 3, StopReason::MaxRounds));
+        assert!(should_run_final_done_check(false, 3, StopReason::Stalled));
+        assert!(should_run_final_done_check(
+            false,
+            3,
+            StopReason::BudgetExhausted
+        ));
+    }
+
+    #[test]
+    fn final_done_check_skipped_when_unnecessary_or_interrupted() {
+        // A passing round already reported — don't pay twice.
+        assert!(!should_run_final_done_check(true, 3, StopReason::GoalMet));
+        // No criteria to check.
+        assert!(!should_run_final_done_check(
+            false,
+            0,
+            StopReason::MaxRounds
+        ));
+        // Ctrl-C means stop now, not "make one more model call".
+        assert!(!should_run_final_done_check(
+            false,
+            3,
+            StopReason::Interrupted
+        ));
     }
 
     #[test]
