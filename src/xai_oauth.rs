@@ -14,6 +14,9 @@ use crate::input::plain_read_line;
 pub const PROVIDER: &str = "grok";
 pub const INFERENCE_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 pub const TOKEN_AUTH_HEADER_VALUE: &str = "xai-grok-cli";
+pub const CLIENT_VERSION_HEADER: &str = "x-grok-client-version";
+pub const CLIENT_VERSION_FALLBACK: &str = "0.2.93";
+pub const USER_AGENT_PREFIX: &str = "xai-grok-workspace";
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const ISSUER: &str = "https://auth.x.ai";
 const DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
@@ -430,7 +433,71 @@ fn save_oauth(credential: OAuthCredential) -> Result<PathBuf> {
     let mut store = AuthStore::load();
     store.set_oauth(PROVIDER, credential);
     store.save()?;
+    let _ = capture_and_cache_client_version();
     auth_file_path().context("no auth file path")
+}
+
+fn client_version_cache_path() -> Option<PathBuf> {
+    auth_file_path().map(|path| path.with_file_name("grok-client-version"))
+}
+
+fn grok_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok"))
+}
+
+fn normalize_client_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re =
+        RE.get_or_init(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").expect("client version regex"));
+    re.captures(trimmed)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn read_cached_client_version() -> Option<String> {
+    let path = client_version_cache_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    normalize_client_version(&text)
+}
+
+fn write_cached_client_version(version: &str) -> Result<()> {
+    let path = client_version_cache_path().context("no client version cache path")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, format!("{version}\n"))?;
+    Ok(())
+}
+
+fn read_grok_cli_version_json() -> Option<String> {
+    let path = grok_home_dir()?.join("version.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("stable_version").and_then(Value::as_str))?;
+    normalize_client_version(version)
+}
+
+pub fn client_version() -> String {
+    let version = read_cached_client_version()
+        .or_else(read_grok_cli_version_json)
+        .unwrap_or_else(|| CLIENT_VERSION_FALLBACK.to_string());
+    let _ = write_cached_client_version(&version);
+    version
+}
+
+pub fn capture_and_cache_client_version() -> String {
+    client_version()
+}
+
+pub fn user_agent() -> String {
+    format!("{USER_AGENT_PREFIX}/{}", client_version())
 }
 
 fn bind_callback_port() -> Result<(TcpListener, u16)> {
@@ -1037,5 +1104,34 @@ mod tests {
         let v = Value::String("2026-07-15T18:03:10.175Z".into());
         let secs = parse_expiry_ms(&v).unwrap();
         assert!(secs > 1_700_000_000);
+    }
+
+    #[test]
+    fn normalize_client_version_extracts_semver() {
+        assert_eq!(
+            normalize_client_version("grok 0.2.106 (bde89716f679) [stable]").as_deref(),
+            Some("0.2.106")
+        );
+        assert_eq!(
+            normalize_client_version("0.2.93").as_deref(),
+            Some("0.2.93")
+        );
+        assert_eq!(normalize_client_version("  ").as_deref(), None);
+        assert_eq!(normalize_client_version("no-version-here").as_deref(), None);
+    }
+
+    #[test]
+    fn user_agent_matches_cli_proxy_convention() {
+        let version = client_version();
+        assert_eq!(user_agent(), format!("xai-grok-workspace/{version}"));
+        assert!(
+            version.split('.').count() == 3,
+            "expected semver-like client version, got {version}"
+        );
+    }
+
+    #[test]
+    fn client_version_fallback_is_current_proxy_default() {
+        assert_eq!(CLIENT_VERSION_FALLBACK, "0.2.93");
     }
 }
