@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-07-25
+
+### Fixed
+
+- **The 2.0.0 rename migration could silently strand credentials and notes.** It
+  skipped entirely when the new directory already existed, and the new directory
+  was easy to create by accident: `client_version()` persisted its cache on every
+  call, including from a test, and any single run creates `<workspace>/.albatross/`.
+  A user in that state stayed logged out after upgrading, with `auth.json` sitting
+  in `~/.config/small-harness`, and a hand-written `rubric.md` stayed in
+  `.small-harness/`. Migration now carries over the entries the new location
+  lacks instead of skipping, still never overwriting a file that is already
+  there. If you upgraded to 2.0.0 and lost your logins, they return on first run
+  of 2.0.1.
+- `client_version()` no longer writes, so reading the Grok client version cannot
+  create the config directory as a side effect. The cache is written on login, as
+  intended. This also stops `cargo test` from writing to the real
+  `~/.config/albatross`.
+
 ## [2.0.0] - 2026-07-25
 
 ### Changed
