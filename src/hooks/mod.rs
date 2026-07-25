@@ -598,6 +598,28 @@ mod tests {
         assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
     }
 
+    #[tokio::test]
+    async fn command_runner_still_exports_pre_rename_env_prefix() {
+        // Hook scripts written before the Albatross rename read SMALL_HARNESS_*.
+        // They must keep working for a release rather than silently receiving an
+        // empty string.
+        let handler = HookCommandConfig {
+            command: r#"if [ "$SMALL_HARNESS_SESSION_ID" = "s1" ] && [ "$SMALL_HARNESS_HOOK_EVENT" = "SessionStart" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            timeout_sec: default_hook_timeout_sec(),
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
+        };
+        let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
+
+        let result = run_command_hook(&handler, &payload).await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn command_runner_drains_stdout_while_writing_large_payload() {

@@ -677,6 +677,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Runs before anything reads the config directory, so a pre-rename install
+    // carries its credentials over instead of looking logged out.
+    if let Some((from, to)) = crate::auth::migrate_legacy_config_dir() {
+        eprintln!("moved config {} → {}", from.display(), to.display());
+    }
     crate::auth::hydrate_env_from_file();
     crate::crash_log::install_panic_hook();
     if let Some(shell) = parse_completions_arg() {

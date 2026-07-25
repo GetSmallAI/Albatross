@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Persistent on-disk credential store.
 ///
@@ -63,19 +63,60 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         .map(|(_, env)| *env)
 }
 
+/// Directory name under the config base. `LEGACY_CONFIG_DIR_NAME` is the
+/// pre-Albatross name, kept only so an existing install can be migrated once.
+const CONFIG_DIR_NAME: &str = "albatross";
+const LEGACY_CONFIG_DIR_NAME: &str = "small-harness";
+
+/// `$XDG_CONFIG_HOME`, falling back to `~/.config`. `None` when neither
+/// XDG_CONFIG_HOME nor HOME is set ("no persistence layer available," not an
+/// error).
+fn config_base() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        Some(PathBuf::from(xdg))
+    } else if let Ok(home) = std::env::var("HOME") {
+        Some(PathBuf::from(home).join(".config"))
+    } else {
+        None
+    }
+}
+
+/// `$XDG_CONFIG_HOME/albatross`, falling back to `~/.config/albatross`.
+pub fn config_dir() -> Option<PathBuf> {
+    config_base().map(|base| base.join(CONFIG_DIR_NAME))
+}
+
 /// `$XDG_CONFIG_HOME/albatross/auth.json`, falling back to
 /// `~/.config/albatross/auth.json`. Returns `None` when neither
 /// XDG_CONFIG_HOME nor HOME is set (`None` means "no persistence layer
 /// available," not an error).
 pub fn auth_file_path() -> Option<PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config")
-    } else {
+    config_dir().map(|dir| dir.join("auth.json"))
+}
+
+/// Move a pre-rename `small-harness` config directory to `albatross` once, so
+/// an existing install keeps its OAuth tokens, API keys, and scorecard history
+/// instead of silently appearing logged out after the rename.
+///
+/// Must run before anything reads the config directory. Returns the moved
+/// `(from, to)` pair when a migration happened.
+pub fn migrate_legacy_config_dir() -> Option<(PathBuf, PathBuf)> {
+    migrate_config_dir_in(&config_base()?)
+}
+
+/// Migration logic against an explicit base, so tests don't mutate process env.
+/// Best-effort: a failed move leaves the legacy directory untouched rather than
+/// blocking startup.
+fn migrate_config_dir_in(base: &Path) -> Option<(PathBuf, PathBuf)> {
+    let legacy = base.join(LEGACY_CONFIG_DIR_NAME);
+    let current = base.join(CONFIG_DIR_NAME);
+    // Never overwrite an existing Albatross directory: if both exist the user
+    // has already run a renamed build, and the legacy copy is stale.
+    if current.exists() || !legacy.is_dir() {
         return None;
-    };
-    Some(base.join("albatross").join("auth.json"))
+    }
+    fs::rename(&legacy, &current).ok()?;
+    Some((legacy, current))
 }
 
 impl AuthStore {
@@ -319,5 +360,45 @@ mod tests {
         assert!(!store.clear("openai"));
         store.set("openai", "sk-x");
         assert!(store.clear("openai"));
+    }
+
+    #[test]
+    fn migration_moves_legacy_config_dir_with_credentials() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("small-harness");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("auth.json"), r#"{"openai":"sk-keep"}"#).unwrap();
+
+        let moved = migrate_config_dir_in(base.path()).expect("migration should run");
+        assert_eq!(moved.1, base.path().join("albatross"));
+        assert!(!legacy.exists());
+
+        // The credential survives the move — the whole point of migrating.
+        let store = AuthStore::load_from(&moved.1.join("auth.json")).unwrap();
+        assert_eq!(store.get("openai"), Some("sk-keep"));
+    }
+
+    #[test]
+    fn migration_is_a_no_op_when_already_renamed() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("small-harness");
+        let current = base.path().join("albatross");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("auth.json"), r#"{"openai":"sk-new"}"#).unwrap();
+
+        // Both exist: the user already ran a renamed build, so the current
+        // directory must not be clobbered by the stale legacy copy.
+        assert!(migrate_config_dir_in(base.path()).is_none());
+        let store = AuthStore::load_from(&current.join("auth.json")).unwrap();
+        assert_eq!(store.get("openai"), Some("sk-new"));
+        assert!(legacy.exists());
+    }
+
+    #[test]
+    fn migration_is_a_no_op_for_a_fresh_install() {
+        let base = tempfile::tempdir().unwrap();
+        assert!(migrate_config_dir_in(base.path()).is_none());
+        assert!(!base.path().join("albatross").exists());
     }
 }

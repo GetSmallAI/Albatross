@@ -238,21 +238,33 @@ fn apply_hook_env(
         command.env(key, value);
     }
     if let Some(event) = payload.get("hook_event_name").and_then(Value::as_str) {
-        command.env("ALBATROSS_HOOK_EVENT", event);
+        set_hook_var(command, "HOOK_EVENT", event);
     }
     if let Some(session_id) = payload.get("session_id").and_then(Value::as_str) {
-        command.env("ALBATROSS_SESSION_ID", session_id);
+        set_hook_var(command, "SESSION_ID", session_id);
     }
     if let Some(turn_id) = payload.get("turn_id").and_then(Value::as_u64) {
-        command.env("ALBATROSS_TURN_ID", turn_id.to_string());
+        set_hook_var(command, "TURN_ID", &turn_id.to_string());
     }
     if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
-        command.env("ALBATROSS_TRANSCRIPT_PATH", path);
+        set_hook_var(command, "TRANSCRIPT_PATH", path);
     }
     if let Some(path) = payload.get("events_path").and_then(Value::as_str) {
-        command.env("ALBATROSS_EVENTS_PATH", path);
+        set_hook_var(command, "EVENTS_PATH", path);
     }
 }
+
+/// Export a hook variable under the current `ALBATROSS_*` name and the
+/// pre-rename `SMALL_HARNESS_*` alias, so hook scripts written before the
+/// rename keep working. The alias is scheduled for removal a release after the
+/// rename ships.
+fn set_hook_var(command: &mut tokio::process::Command, suffix: &str, value: &str) {
+    command.env(format!("{HOOK_VAR_PREFIX}{suffix}"), value);
+    command.env(format!("{LEGACY_HOOK_VAR_PREFIX}{suffix}"), value);
+}
+
+const HOOK_VAR_PREFIX: &str = "ALBATROSS_";
+const LEGACY_HOOK_VAR_PREFIX: &str = "SMALL_HARNESS_";
 
 #[cfg(not(windows))]
 fn inherited_hook_env_allowlist() -> &'static [&'static str] {
