@@ -246,7 +246,10 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- Formula/albatross.rb; then
+          # `git status --porcelain` rather than `git diff`: diff reports no
+          # change for an untracked file, so a newly added formula (as after a
+          # rename) would look unchanged and silently skip the commit.
+          if [[ -z "$(git status --porcelain -- Formula/albatross.rb)" ]]; then
             echo "Formula already at ${{ needs.publish.outputs.version }} — nothing to do."
             exit 0
           fi
