@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.86%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-2.0.2-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
@@ -81,7 +81,7 @@ few that aren't usual:
 brew install morganlinton/tap/albatross
 ```
 
-**From source** (Rust 1.75+):
+**From source** (Rust 1.86+):
 
 ```bash
 git clone https://github.com/morganlinton/Albatross.git
@@ -395,6 +395,7 @@ this exact call`. The session cache resets on `/new`.
 /verbose on|off        show every tool call with its full args + result
 /trace on|off          show nested subagent/critic tool calls (indented)
 /hooks                 list, trust, enable, or disable configured hooks
+/mcp                   list or trust project MCP servers
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 /fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
 /route select|apply    select or apply a configured multi-model stack route
@@ -699,9 +700,21 @@ Add an `mcpServers` block to `agent.config.json`:
 }
 ```
 
-Albatross spawns each server at startup, lists its tools, and exposes
-them through the same approval-gated tool layer with names like
-`mcp__fs__read_file`. JSON-RPC over stdio; no extra dependencies.
+Because this file is project-local and MCP servers are executable programs,
+Albatross does not spawn a new or changed server automatically. Review the
+command and explicit environment first, then trust its current configuration:
+
+```text
+/mcp list
+/mcp trust fs
+```
+
+Trust is stored per canonical workspace and configuration hash under
+`~/.config/albatross/`; editing the command, arguments, or environment revokes
+it. Trusted servers start automatically on later launches. Their processes
+receive only a small system environment allowlist plus the explicit `env` block,
+and their tools remain approval-gated with names like `mcp__fs__read_file`.
+JSON-RPC over stdio; no extra dependencies.
 
 ### Hooks
 

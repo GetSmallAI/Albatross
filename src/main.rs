@@ -34,6 +34,7 @@ mod markdown;
 mod mcp;
 mod model_system;
 mod openai;
+mod path_security;
 mod planner;
 mod playground;
 mod project_memory;
@@ -870,12 +871,23 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if !state.config.mcp_servers.is_empty() {
-        let (tools, errors) = crate::mcp::spawn_configured(&state.config.mcp_servers).await;
+        let (trusted, discovery) =
+            crate::mcp::trusted_configured(&state.config.mcp_servers, &state.config.workspace_root);
+        let pending = discovery
+            .iter()
+            .filter(|entry| entry.status != crate::mcp::McpTrustStatus::Trusted)
+            .count();
+        if pending > 0 {
+            println!(
+                "  {YELLOW}!{RESET} {DIM}MCP: {pending} new or modified server(s) skipped; review with /mcp{RESET}"
+            );
+        }
+        let (tools, errors) = crate::mcp::spawn_configured(&trusted).await;
         if !tools.is_empty() {
             println!(
                 "  {DIM}MCP: {} tool(s) loaded from {} server(s){RESET}",
                 tools.len(),
-                state.config.mcp_servers.len() - errors.len()
+                trusted.len() - errors.len()
             );
         }
         for err in &errors {

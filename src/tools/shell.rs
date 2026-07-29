@@ -4,11 +4,23 @@ use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio::process::Child;
 
 use super::PathPolicy;
 use super::Tool;
 use crate::cancel::CancellationToken;
 use crate::config::ApprovalPolicy;
+
+const SHELL_CLEANUP_GRACE: Duration = Duration::from_millis(500);
+
+#[cfg(unix)]
+const SIGKILL: std::os::raw::c_int = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setpgid(pid: std::os::raw::c_int, pgid: std::os::raw::c_int) -> std::os::raw::c_int;
+    fn kill(pid: std::os::raw::c_int, sig: std::os::raw::c_int) -> std::os::raw::c_int;
+}
 
 pub struct ShellTool {
     pub policy: ApprovalPolicy,
@@ -179,6 +191,8 @@ impl Tool for ShellTool {
             .args(["-c", &args.command])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command.kill_on_drop(true);
+        configure_shell_process(&mut command);
         scrub_secret_env(&mut command);
 
         let mut child = match command.spawn() {
@@ -190,38 +204,38 @@ impl Tool for ShellTool {
                 });
             }
         };
+        let child_group = child.id();
 
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
 
-        let read_so = tokio::spawn(async move {
+        let mut read_so = tokio::spawn(async move {
             let mut buf = Vec::new();
             let mut s = stdout;
             let _ = s.read_to_end(&mut buf).await;
             buf
         });
-        let read_se = tokio::spawn(async move {
+        let mut read_se = tokio::spawn(async move {
             let mut buf = Vec::new();
             let mut s = stderr;
             let _ = s.read_to_end(&mut buf).await;
             buf
         });
 
-        let wait_fut = tokio::time::timeout(timeout, child.wait());
+        let deadline = tokio::time::Instant::now() + timeout;
+        let wait_fut = tokio::time::timeout_at(deadline, child.wait());
         let (exit_code, timed_out, cancelled) = if let Some(cancel) = cancel {
             tokio::select! {
                 result = wait_fut => match result {
                     Ok(Ok(status)) => (status.code().unwrap_or(1), false, false),
                     Ok(Err(_)) => (1, false, false),
                     Err(_) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        let _ = terminate_shell_tree(&mut child, child_group).await;
                         (-1, true, false)
                     }
                 },
                 _ = cancel.cancelled() => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    let _ = terminate_shell_tree(&mut child, child_group).await;
                     (-1, false, true)
                 }
             }
@@ -230,15 +244,36 @@ impl Tool for ShellTool {
                 Ok(Ok(status)) => (status.code().unwrap_or(1), false, false),
                 Ok(Err(_)) => (1, false, false),
                 Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    let _ = terminate_shell_tree(&mut child, child_group).await;
                     (-1, true, false)
                 }
             }
         };
 
-        let so = read_so.await.unwrap_or_default();
-        let se = read_se.await.unwrap_or_default();
+        let mut timed_out = timed_out;
+        let reader_deadline = if timed_out || cancelled {
+            tokio::time::Instant::now() + SHELL_CLEANUP_GRACE
+        } else {
+            deadline
+        };
+        let so = match tokio::time::timeout_at(reader_deadline, &mut read_so).await {
+            Ok(result) => result.unwrap_or_default(),
+            Err(_) => {
+                timed_out = true;
+                kill_shell_process_group(child_group);
+                read_so.abort();
+                Vec::new()
+            }
+        };
+        let se = match tokio::time::timeout(SHELL_CLEANUP_GRACE, &mut read_se).await {
+            Ok(result) => result.unwrap_or_default(),
+            Err(_) => {
+                timed_out = true;
+                kill_shell_process_group(child_group);
+                read_se.abort();
+                Vec::new()
+            }
+        };
 
         const MAX_BYTES: usize = 256 * 1024;
         let mut combined = String::new();
@@ -289,6 +324,46 @@ impl Tool for ShellTool {
         Value::Object(obj)
     }
 }
+
+async fn terminate_shell_tree(child: &mut Child, child_group: Option<u32>) -> Option<i32> {
+    kill_shell_process_group(child_group);
+    let _ = child.start_kill();
+    tokio::time::timeout(SHELL_CLEANUP_GRACE, child.wait())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|status| status.code())
+}
+
+#[cfg(unix)]
+fn configure_shell_process(command: &mut tokio::process::Command) {
+    use std::io;
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        command.as_std_mut().pre_exec(|| {
+            if setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_shell_process(_command: &mut tokio::process::Command) {}
+
+#[cfg(unix)]
+fn kill_shell_process_group(child_group: Option<u32>) {
+    if let Some(pid) = child_group.and_then(|pid| i32::try_from(pid).ok()) {
+        unsafe {
+            let _ = kill(-pid, SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_shell_process_group(_child_group: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -411,5 +486,24 @@ mod tests {
             output.contains("done"),
             "expected command to run; output: {output}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_background_processes_and_bounds_pipe_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("should-not-exist");
+        let command = format!("(sleep 2; touch {}) & wait", marker.to_string_lossy());
+        let started = std::time::Instant::now();
+        let output = ShellTool {
+            policy: ApprovalPolicy::Never,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "command": command, "timeout": 1 }))
+        .await;
+        assert_eq!(output["timedOut"].as_bool(), Some(true));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(!marker.exists());
     }
 }

@@ -90,6 +90,7 @@ mod context_cmds;
 mod doctor;
 mod fable;
 mod hooks_cmds;
+mod mcp_cmds;
 mod memory;
 mod route;
 mod scorecard;
@@ -191,6 +192,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/hooks",
         "List, trust, enable, or disable configured hooks",
     ),
+    ("/mcp", "List or trust project MCP servers"),
     (
         "/backend",
         "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex, grok); --default persists",
@@ -296,6 +298,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/verbose" => config_cmds::cmd_verbose(&args, state),
         "/trace" => config_cmds::cmd_trace(&args, state),
         "/hooks" => hooks_cmds::cmd_hooks(&args, state)?,
+        "/mcp" => mcp_cmds::cmd_mcp(&args, state).await?,
         "/backend" => config_cmds::cmd_backend(&args, state).await?,
         "/model" => config_cmds::cmd_model(&args, state).await?,
         "/tools" => config_cmds::cmd_tools(&args, state),

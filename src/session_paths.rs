@@ -709,13 +709,13 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 pub fn resolve_under_workspace(workspace_root: &Path, path: &str) -> Option<PathBuf> {
-    let workspace_root = normalize_path(workspace_root);
+    let workspace_root = crate::path_security::canonical_root(workspace_root);
     let joined = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
         workspace_root.join(path)
     };
-    let normalized = normalize_path(&joined);
+    let normalized = crate::path_security::resolve_existing_prefix(&joined);
     if normalized.starts_with(&workspace_root) {
         Some(normalized)
     } else {

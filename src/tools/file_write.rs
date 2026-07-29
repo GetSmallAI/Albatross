@@ -161,4 +161,26 @@ mod tests {
         assert!(t1.require_approval(&v));
         assert!(!t2.require_approval(&v));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deny_policy_rejects_write_through_workspace_symlink() {
+        use crate::config::OutsideWorkspace;
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), workspace.path().join("link")).unwrap();
+        let result = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::new(
+                workspace.path().to_str().unwrap(),
+                OutsideWorkspace::Deny,
+            ),
+        }
+        .execute(json!({ "path": "link/secret.txt", "content": "leak" }))
+        .await;
+        assert!(result.get("error").is_some());
+        assert!(!outside.path().join("secret.txt").exists());
+    }
 }

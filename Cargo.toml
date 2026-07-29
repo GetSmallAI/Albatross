@@ -2,6 +2,7 @@
 name = "albatross"
 version = "2.0.2"
 edition = "2021"
+rust-version = "1.86"
 description = "Terminal-based agent harness for running small LLMs on your Mac"
 license = "MIT"
 repository = "https://github.com/morganlinton/Albatross"

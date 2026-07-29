@@ -2,13 +2,18 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::tools::{Tool, ToolPreview};
+
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Map of in-flight JSON-RPC requests indexed by id, with a one-shot
 /// channel sender ready to receive each response.
@@ -27,6 +32,130 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpTrustFile {
+    #[serde(default)]
+    workspaces: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTrustStatus {
+    Trusted,
+    Modified,
+    Untrusted,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerTrust {
+    pub name: String,
+    pub hash: String,
+    pub status: McpTrustStatus,
+}
+
+fn trust_file_path() -> Option<PathBuf> {
+    crate::auth::config_dir().map(|dir| dir.join("mcp-trust.json"))
+}
+
+fn workspace_key(workspace_root: &str) -> String {
+    crate::path_security::canonical_root(Path::new(workspace_root))
+        .display()
+        .to_string()
+}
+
+fn server_hash(cfg: &McpServerConfig) -> String {
+    let bytes = serde_json::to_vec(cfg).expect("MCP configuration serializes");
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2 + 7);
+    out.push_str("sha256:");
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn load_trust_file() -> McpTrustFile {
+    let Some(path) = trust_file_path() else {
+        return McpTrustFile::default();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_trust_file(file: &McpTrustFile) -> Result<()> {
+    let path = trust_file_path()
+        .ok_or_else(|| anyhow!("HOME or XDG_CONFIG_HOME is required to save MCP trust"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let body = serde_json::to_string_pretty(file)? + "\n";
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
+}
+
+pub fn configured_trust(
+    servers: &BTreeMap<String, McpServerConfig>,
+    workspace_root: &str,
+) -> Vec<McpServerTrust> {
+    let trust = load_trust_file();
+    configured_trust_from(servers, workspace_root, &trust)
+}
+
+fn configured_trust_from(
+    servers: &BTreeMap<String, McpServerConfig>,
+    workspace_root: &str,
+    trust: &McpTrustFile,
+) -> Vec<McpServerTrust> {
+    let key = workspace_key(workspace_root);
+    let saved = trust.workspaces.get(&key);
+    servers
+        .iter()
+        .map(|(name, cfg)| {
+            let hash = server_hash(cfg);
+            let status = match saved.and_then(|servers| servers.get(name)) {
+                Some(saved_hash) if saved_hash == &hash => McpTrustStatus::Trusted,
+                Some(_) => McpTrustStatus::Modified,
+                None => McpTrustStatus::Untrusted,
+            };
+            McpServerTrust {
+                name: name.clone(),
+                hash,
+                status,
+            }
+        })
+        .collect()
+}
+
+pub fn trusted_configured(
+    servers: &BTreeMap<String, McpServerConfig>,
+    workspace_root: &str,
+) -> (BTreeMap<String, McpServerConfig>, Vec<McpServerTrust>) {
+    let discovery = configured_trust(servers, workspace_root);
+    let trusted = discovery
+        .iter()
+        .filter(|entry| entry.status == McpTrustStatus::Trusted)
+        .filter_map(|entry| {
+            servers
+                .get(&entry.name)
+                .cloned()
+                .map(|cfg| (entry.name.clone(), cfg))
+        })
+        .collect();
+    (trusted, discovery)
+}
+
+pub fn trust_server(workspace_root: &str, name: &str, cfg: &McpServerConfig) -> Result<()> {
+    let mut trust = load_trust_file();
+    trust
+        .workspaces
+        .entry(workspace_key(workspace_root))
+        .or_default()
+        .insert(name.to_string(), server_hash(cfg));
+    save_trust_file(&trust)
 }
 
 /// Public summary of a tool exposed by an MCP server.
@@ -61,13 +190,12 @@ impl McpClient {
     /// Spawn an MCP server process and run the initialize handshake.
     pub async fn spawn(name: &str, cfg: &McpServerConfig) -> Result<Self> {
         let mut cmd = Command::new(&cfg.command);
+        apply_mcp_env(&mut cmd, cfg);
         cmd.args(&cfg.args);
-        for (k, v) in &cfg.env {
-            cmd.env(k, v);
-        }
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+        cmd.kill_on_drop(true);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning MCP server `{name}` ({})", cfg.command))?;
@@ -212,7 +340,16 @@ impl McpClient {
                 .context("writing JSON-RPC request to MCP server")?;
             stdin.flush().await.context("flushing MCP server stdin")?;
         }
-        rx.await.context("MCP response channel dropped")?
+        match tokio::time::timeout(MCP_REQUEST_TIMEOUT, rx).await {
+            Ok(result) => result.context("MCP response channel dropped")?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(anyhow!(
+                    "MCP request `{method}` timed out after {}s",
+                    MCP_REQUEST_TIMEOUT.as_secs()
+                ))
+            }
+        }
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
@@ -231,6 +368,36 @@ impl McpClient {
         stdin.flush().await.context("flushing MCP server stdin")?;
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn inherited_mcp_env_allowlist() -> &'static [&'static str] {
+    &["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]
+}
+
+fn apply_mcp_env(command: &mut Command, cfg: &McpServerConfig) {
+    command.env_clear();
+    for key in inherited_mcp_env_allowlist() {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in &cfg.env {
+        command.env(key, value);
+    }
+}
+
+#[cfg(windows)]
+fn inherited_mcp_env_allowlist() -> &'static [&'static str] {
+    &[
+        "PATH",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+    ]
 }
 
 async fn handle_incoming(server_name: &str, line: &str, pending: &PendingMap) {
@@ -389,6 +556,60 @@ mod tests {
         let cfg: McpServerConfig = serde_json::from_str(r#"{"command": "x"}"#).unwrap();
         assert!(cfg.args.is_empty());
         assert!(cfg.env.is_empty());
+    }
+
+    #[test]
+    fn project_server_requires_matching_workspace_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut servers = BTreeMap::new();
+        let cfg = McpServerConfig {
+            command: "server-a".into(),
+            args: vec!["--stdio".into()],
+            env: BTreeMap::new(),
+        };
+        servers.insert("demo".into(), cfg.clone());
+
+        let empty = configured_trust_from(
+            &servers,
+            dir.path().to_str().unwrap(),
+            &McpTrustFile::default(),
+        );
+        assert_eq!(empty[0].status, McpTrustStatus::Untrusted);
+
+        let mut trust = McpTrustFile::default();
+        trust.workspaces.insert(
+            workspace_key(dir.path().to_str().unwrap()),
+            BTreeMap::from([("demo".into(), server_hash(&cfg))]),
+        );
+        let trusted = configured_trust_from(&servers, dir.path().to_str().unwrap(), &trust);
+        assert_eq!(trusted[0].status, McpTrustStatus::Trusted);
+
+        servers
+            .get_mut("demo")
+            .unwrap()
+            .args
+            .push("--changed".into());
+        let modified = configured_trust_from(&servers, dir.path().to_str().unwrap(), &trust);
+        assert_eq!(modified[0].status, McpTrustStatus::Modified);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_environment_does_not_inherit_arbitrary_parent_values() {
+        const PARENT_ONLY: &str = "ALBATROSS_MCP_PARENT_ONLY_TEST";
+        std::env::set_var(PARENT_ONLY, "must-not-leak");
+        let cfg = McpServerConfig {
+            command: "env".into(),
+            args: Vec::new(),
+            env: BTreeMap::from([("MCP_EXPLICIT_TEST".into(), "allowed".into())]),
+        };
+        let mut command = Command::new("env");
+        apply_mcp_env(&mut command, &cfg);
+        let output = command.output().await.unwrap();
+        std::env::remove_var(PARENT_ONLY);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains(PARENT_ONLY));
+        assert!(stdout.contains("MCP_EXPLICIT_TEST=allowed"));
     }
 
     #[tokio::test]

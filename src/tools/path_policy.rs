@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::config::OutsideWorkspace;
 
@@ -17,7 +17,7 @@ pub struct PathPolicy {
 impl PathPolicy {
     pub fn new(root: &str, outside: OutsideWorkspace) -> Self {
         Self {
-            root: normalize(Path::new(root)),
+            root: crate::path_security::canonical_root(Path::new(root)),
             outside,
         }
     }
@@ -28,15 +28,8 @@ impl PathPolicy {
 
     pub fn resolve(&self, path: &str) -> PathResolution {
         let p = Path::new(path);
-        let joined = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| self.root.clone())
-                .join(p)
-        };
-        let normalized = normalize(&joined);
-        let outside_workspace = !normalized.starts_with(&self.root);
+        let (normalized, outside_workspace) =
+            crate::path_security::resolve_under_root(&self.root, &self.root, p);
         PathResolution {
             normalized,
             outside_workspace,
@@ -79,7 +72,7 @@ impl PathPolicy {
 
     fn cwd_is_inside(&self) -> bool {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        normalize(&cwd).starts_with(&self.root)
+        crate::path_security::resolve_existing_prefix(&cwd).starts_with(&self.root)
     }
 }
 
@@ -87,26 +80,6 @@ impl Default for PathPolicy {
     fn default() -> Self {
         Self::new(".", OutsideWorkspace::Allow)
     }
-}
-
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = if path.is_absolute() {
-        PathBuf::new()
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            Component::RootDir => out.push(Path::new("/")),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -127,5 +100,18 @@ mod tests {
         let policy = PathPolicy::new("/tmp/workspace", OutsideWorkspace::Prompt);
         assert!(policy.resolve("/tmp/other/file.txt").outside_workspace);
         assert!(policy.require_prompt_for_path("/tmp/other/file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), workspace.path().join("link")).unwrap();
+        let policy = PathPolicy::new(workspace.path().to_str().unwrap(), OutsideWorkspace::Deny);
+        assert!(policy.resolve("link/secret.txt").outside_workspace);
+        assert!(policy.deny_path("link/secret.txt").is_some());
     }
 }

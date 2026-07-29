@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Project-local MCP server commands now require per-workspace, configuration-hash
+  trust before Albatross spawns them. MCP child processes start with a cleared,
+  allowlisted environment plus only explicitly configured variables, and MCP
+  requests have a bounded timeout.
+- Workspace path enforcement now resolves existing and dangling symlinks before
+  allowing file operations, batch edits, checkpoints, or session-path restores,
+  preventing symlink traversal outside a denied workspace.
+- Shell timeout and cancellation now terminate the full process group and bound
+  output-pipe cleanup so background descendants cannot outlive or indefinitely
+  stall a tool call.
+
+### Changed
+
+- The supported Rust minimum is now declared and continuously tested as 1.86,
+  matching the locked dependency graph.
+
 ## [2.0.2] - 2026-07-25
 
 ### Changed

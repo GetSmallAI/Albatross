@@ -397,7 +397,7 @@ fn resolve_workspace_file(workspace_root: &Path, file_path: &str) -> Result<Path
     if clean.as_os_str().is_empty() {
         return Err(anyhow!("file path is empty"));
     }
-    let full_path = normalize_path(&workspace_root.join(clean));
+    let full_path = crate::path_security::resolve_existing_prefix(&workspace_root.join(clean));
     if !full_path.starts_with(workspace_root) {
         return Err(anyhow!("path escapes workspace root"));
     }
@@ -446,6 +446,31 @@ mod tests {
 
         assert_eq!(result.failed.len(), 1);
         assert!(result.failed[0].error.contains("parent paths"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_files_that_escape_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "keep\n").unwrap();
+        symlink(outside.path(), workspace.path().join("link")).unwrap();
+        let operations = vec![BatchEditOperation {
+            file_path: "link/secret.txt".into(),
+            operation: EditOperation::Replace {
+                old_string: "keep".into(),
+                new_string: "changed".into(),
+            },
+        }];
+        let result = execute_batch_operations(&operations, workspace.path(), false).unwrap();
+        assert!(result.successful.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "keep\n"
+        );
     }
 
     #[test]

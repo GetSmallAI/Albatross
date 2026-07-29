@@ -393,34 +393,14 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|byte| *byte == 0)
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut out = if path.is_absolute() {
-        PathBuf::new()
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            Component::RootDir => out.push(Path::new("/")),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    out
-}
-
 fn resolve_under_workspace(workspace_root: &Path, path: &str) -> Option<PathBuf> {
-    let workspace_root = normalize_path(workspace_root);
+    let workspace_root = crate::path_security::canonical_root(workspace_root);
     let joined = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
         workspace_root.join(path)
     };
-    let normalized = normalize_path(&joined);
+    let normalized = crate::path_security::resolve_existing_prefix(&joined);
     if normalized.starts_with(&workspace_root) {
         Some(normalized)
     } else {
@@ -430,7 +410,7 @@ fn resolve_under_workspace(workspace_root: &Path, path: &str) -> Option<PathBuf>
 
 fn relative_workspace_path(workspace_root: &Path, path: &str) -> Option<String> {
     let full = resolve_under_workspace(workspace_root, path)?;
-    let workspace_root = normalize_path(workspace_root);
+    let workspace_root = crate::path_security::canonical_root(workspace_root);
     full.strip_prefix(&workspace_root)
         .ok()
         .map(|rel| {
