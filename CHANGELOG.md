@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added durable `.albatross/routes.jsonl` routing receipts plus `/route explain`,
+  `/route history`, and `/route spend` for inspecting candidate snapshots,
+  selector rationale, requested and provider-resolved models, requested and
+  effective effort, tokens, latency, cost source, and aggregate spend.
+
 ### Security
 
 - Project-local MCP server commands now require per-workspace, configuration-hash
@@ -21,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Selector and routed-planner calls now contribute to session cost accounting,
+  and routed coding/plan-execution turns are correlated back to their route ID.
 - The supported Rust minimum is now declared and continuously tested as 1.86,
   matching the locked dependency graph.
 

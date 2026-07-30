@@ -758,6 +758,7 @@ mod tests {
             backend: backend(config.backend),
             model: "test-model".into(),
             active_effort: None,
+            active_route: None,
             messages: Vec::new(),
             session_dir,
             session_path,

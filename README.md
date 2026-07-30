@@ -399,6 +399,9 @@ this exact call`. The session cache resets on `/new`.
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 /fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
 /route select|apply    select or apply a configured multi-model stack route
+/route explain         explain the latest (or named) route and every linked call
+/route history [N]     show recent durable route decisions
+/route spend           aggregate routed spend by role and resolved model
 ```
 
 **Memory, capabilities, context**
@@ -933,6 +936,9 @@ template` prints the JSON shape to paste into `agent.config.json`.
 /route apply coder high
 /route apply review production
 /route apply security
+/route explain
+/route history 20
+/route spend
 ```
 
 `/route select` sends the task plus the configured stack to
@@ -944,6 +950,19 @@ chosen coding model unless `--dry-run` is passed. The selector can also return
 active session effort, appears in `/session` and the turn footer, and is sent to
 OpenRouter as `reasoning.effort`; local backends ignore unsupported request
 fields while still showing the selected effort.
+
+Every selection and routed model call is appended to
+`.albatross/routes.jsonl`. Receipts include the candidate-stack snapshot,
+task hash and bounded preview, selector rationale, requested backend/model,
+provider-resolved model and provider when reported, requested versus effective
+effort, tokens, cache usage, latency, cost, and whether cost came from the
+provider, the local catalog, or is unknown. The ledger is project-local and
+gitignored because task previews may be sensitive.
+
+`/route explain [route-id]` renders one complete receipt, `/route history [N]`
+shows recent decisions, and `/route spend` aggregates all recorded calls by
+role and resolved model. Selector and routed-planner costs are included in the
+live session total instead of being displayed as disconnected side costs.
 
 For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
 or a planner override to create `.albatross/plan.json`; `/plan execute`

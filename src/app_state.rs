@@ -9,6 +9,7 @@ use crate::hooks::HookRegistry;
 use crate::model_system::EffortLevel;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
+use crate::route_audit::ActiveRouteContext;
 use crate::session_paths::PathStore;
 use crate::tools::Tool;
 use crate::turn_checkpoint::CheckpointStack;
@@ -51,6 +52,10 @@ pub struct AppState {
     pub backend: BackendDescriptor,
     pub model: String,
     pub active_effort: Option<EffortLevel>,
+    /// Most recently applied `/route select` decision. Model-call receipts use
+    /// this to correlate subsequent coding turns with the decision that chose
+    /// the active model.
+    pub active_route: Option<ActiveRouteContext>,
     pub messages: Vec<ChatMessage>,
     pub session_dir: String,
     pub session_path: PathBuf,
@@ -124,6 +129,7 @@ impl AppState {
     pub fn reset_session(&mut self) {
         self.session_path = crate::session::new_session_path(&self.session_dir);
         self.path_store = PathStore::new(&self.session_dir, &self.session_path, &self.config.paths);
+        self.active_route = None;
         if let Ok(mut trace) = self.trace.lock() {
             trace.begin_turn();
         }

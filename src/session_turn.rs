@@ -26,6 +26,7 @@ use crate::project_memory::{
     maybe_project_context, refresh_project_memory_after_write, render_stable_system_prompt,
     PROJECT_CONTEXT_HEADER,
 };
+use crate::route_audit::{append_event, model_call_event, session_id, ModelCallInput};
 use crate::session::save_message;
 use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
@@ -896,20 +897,60 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             println!("  {YELLOW}!{RESET} {DIM}scorecard turn not recorded: {e}{RESET}");
         }
     }
-    let turn_cost = res.reported_cost_usd.or_else(|| {
-        turn_cost_usd(
-            state.config.backend,
-            &state.model,
-            res.input_tokens,
-            res.output_tokens,
-        )
-    });
+    let catalog_cost = turn_cost_usd(
+        state.config.backend,
+        &state.model,
+        res.input_tokens,
+        res.output_tokens,
+    );
+    let (turn_cost, cost_source) = if let Some(cost) = res.reported_cost_usd {
+        (Some(cost), "provider-reported")
+    } else if let Some(cost) = catalog_cost {
+        (Some(cost), "catalog-estimate")
+    } else if state.config.backend.is_local() {
+        (Some(0.0), "local")
+    } else {
+        (None, "unknown")
+    };
     match turn_cost {
         Some(c) => state.session_usd += c,
         None => {
             if !state.config.backend.is_local() && (res.input_tokens > 0 || res.output_tokens > 0) {
                 state.session_cost_has_unknown = true;
             }
+        }
+    }
+    let route_context = state
+        .active_route
+        .as_ref()
+        .filter(|context| context.backend == state.config.backend && context.model == state.model);
+    let role = route_context
+        .map(|context| context.role.as_str())
+        .unwrap_or(opts.source);
+    let receipt = model_call_event(ModelCallInput {
+        route_id: route_context.map(|context| context.route_id.as_str()),
+        session_id: &session_id(&state.session_path),
+        role,
+        backend: state.config.backend,
+        requested_model: &state.model,
+        actual_model: res.actual_model.as_deref(),
+        provider: res.provider.as_deref(),
+        requested_effort: state.active_effort,
+        input_tokens: res.input_tokens,
+        output_tokens: res.output_tokens,
+        cached_input_tokens: res.cached_input_tokens,
+        cost_usd: turn_cost,
+        cost_source,
+        duration_ms: metrics.model_ms,
+        status: if res.hit_step_limit {
+            "step-limit"
+        } else {
+            "ok"
+        },
+    });
+    if let Err(error) = append_event(&state.config.workspace_root, &receipt) {
+        if state.renderer.verbose_enabled() {
+            println!("  {YELLOW}!{RESET} {DIM}route receipt not recorded: {error}{RESET}");
         }
     }
 
@@ -1102,6 +1143,7 @@ mod cost_tests {
             backend,
             model: "mock".into(),
             active_effort: None,
+            active_route: None,
             messages: Vec::new(),
             session_dir: session_dir.clone(),
             session_path: session_path.clone(),

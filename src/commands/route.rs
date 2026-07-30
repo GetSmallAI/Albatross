@@ -5,6 +5,12 @@ use crate::model_system::{
     EffortLevel, ModelRef, ModelSystemConfig, ModelTierSet, ReviewModelSet, ReviewTier,
     RouteDecision, TaskComplexity,
 };
+use crate::route_audit::{
+    append_event, ledger_path, model_call_event, new_route_id, read_events, session_id, task_hash,
+    task_preview, ActiveRouteContext, ModelCallInput, RouteLedgerEvent, RoutedModelReceipt,
+    RoutedReviewReceipt,
+};
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RouteApplyTarget {
@@ -25,6 +31,9 @@ struct RouteSelectArgs {
 enum RouteInvocation {
     Status,
     Template,
+    History(usize),
+    Explain(Option<String>),
+    Spend,
     Apply(RouteApplyTarget),
     Select(RouteSelectArgs),
 }
@@ -49,6 +58,9 @@ pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
         RouteInvocation::Template => {
             print_route_template();
         }
+        RouteInvocation::History(limit) => print_route_history(state, limit)?,
+        RouteInvocation::Explain(route_id) => print_route_explanation(state, route_id.as_deref())?,
+        RouteInvocation::Spend => print_route_spend(state)?,
         RouteInvocation::Apply(target) => {
             apply_route_target(state, target)?;
         }
@@ -61,7 +73,7 @@ pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
 
 fn route_usage() {
     println!(
-        "  {DIM}Usage: /route status · /route template · /route select [--dry-run] <task> · /route apply coder|orchestrator low|medium|high · /route apply review play|production · /route apply security{RESET}"
+        "  {DIM}Usage: /route status · /route history [N] · /route explain [id] · /route spend · /route template · /route select [--dry-run] <task> · /route apply coder|orchestrator low|medium|high · /route apply review play|production · /route apply security{RESET}"
     );
 }
 
@@ -72,6 +84,22 @@ fn parse_route_args(args: &str) -> Option<RouteInvocation> {
     }
     if trimmed == "template" || trimmed == "config" {
         return Some(RouteInvocation::Template);
+    }
+    if trimmed == "spend" || trimmed == "cost" || trimmed == "costs" {
+        return Some(RouteInvocation::Spend);
+    }
+    if trimmed == "history" {
+        return Some(RouteInvocation::History(10));
+    }
+    if let Some(rest) = trimmed.strip_prefix("history ") {
+        return rest.trim().parse().ok().map(RouteInvocation::History);
+    }
+    if trimmed == "explain" {
+        return Some(RouteInvocation::Explain(None));
+    }
+    if let Some(rest) = trimmed.strip_prefix("explain ") {
+        let id = rest.trim();
+        return (!id.is_empty()).then(|| RouteInvocation::Explain(Some(id.to_string())));
     }
 
     if let Some(rest) = trimmed.strip_prefix("apply ") {
@@ -176,6 +204,260 @@ fn print_route_status(stack: &ModelSystemConfig) {
     print_tier_set("coder", &stack.coders);
     print_review_set("review", &stack.reviewers);
     print_model_ref("security", stack.security_reviewer.as_ref());
+}
+
+fn print_route_history(state: &AppState, limit: usize) -> Result<()> {
+    let events = read_events(&state.config.workspace_root)?;
+    let decisions = events
+        .iter()
+        .filter_map(|event| match event {
+            RouteLedgerEvent::RouteDecision {
+                timestamp,
+                route_id,
+                decision,
+                coder,
+                task_preview,
+                applied,
+                ..
+            } => Some((timestamp, route_id, decision, coder, task_preview, applied)),
+            _ => None,
+        })
+        .rev()
+        .take(limit.max(1))
+        .collect::<Vec<_>>();
+    if decisions.is_empty() {
+        println!(
+            "  {DIM}No route decisions recorded yet. Ledger: {}{RESET}",
+            ledger_path(&state.config.workspace_root).display()
+        );
+        return Ok(());
+    }
+    println!(
+        "  {DIM}route history{RESET}      latest {}",
+        decisions.len()
+    );
+    for (timestamp, route_id, decision, coder, preview, applied) in decisions {
+        let mode = if *applied { "applied" } else { "dry-run" };
+        println!(
+            "  {DIM}{timestamp}{RESET} {CYAN}{route_id}{RESET} · {} · {} · {mode}",
+            decision.complexity.as_str(),
+            coder.model.detail_with_effort(coder.effort)
+        );
+        println!("    {DIM}{}{RESET}", preview);
+    }
+    Ok(())
+}
+
+fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Result<()> {
+    let events = read_events(&state.config.workspace_root)?;
+    let decision = events.iter().rev().find(|event| match event {
+        RouteLedgerEvent::RouteDecision { route_id, .. } => {
+            requested_id.map(|id| id == route_id).unwrap_or(true)
+        }
+        _ => false,
+    });
+    let Some(RouteLedgerEvent::RouteDecision {
+        timestamp,
+        route_id,
+        session_id,
+        task_hash,
+        task_preview,
+        selector,
+        model_system,
+        decision,
+        orchestrator,
+        coder,
+        reviewer,
+        security,
+        applied,
+    }) = decision
+    else {
+        println!("  {DIM}No matching route decision found.{RESET}");
+        return Ok(());
+    };
+    println!("  {DIM}route{RESET}             {CYAN}{route_id}{RESET}");
+    println!("  {DIM}timestamp{RESET}         {timestamp}");
+    println!("  {DIM}session{RESET}           {session_id}");
+    println!("  {DIM}task{RESET}              {task_preview}");
+    println!("  {DIM}task hash{RESET}         {task_hash}");
+    println!("  {DIM}selector{RESET}          {}", selector.detail());
+    println!("  {DIM}candidate snapshot{RESET}");
+    print_route_status(model_system);
+    println!(
+        "  {DIM}decision{RESET}          {} · {}",
+        decision.complexity.as_str(),
+        if *applied { "applied" } else { "dry-run" }
+    );
+    if let Some(reason) = decision.reason.as_deref() {
+        println!("  {DIM}reason{RESET}            {reason}");
+    }
+    if let Some(model) = orchestrator {
+        println!("  {DIM}orchestrator{RESET}      {}", model.detail());
+    }
+    println!(
+        "  {DIM}coder{RESET}             {}",
+        coder.model.detail_with_effort(coder.effort)
+    );
+    match reviewer.as_ref() {
+        Some(review) => println!(
+            "  {DIM}review{RESET}            {} · {}",
+            review.tier,
+            review.model.detail_with_effort(review.effort)
+        ),
+        None => println!("  {DIM}review{RESET}            skipped"),
+    }
+    match security.as_ref() {
+        Some(security) => println!(
+            "  {DIM}security{RESET}          {}",
+            security.model.detail_with_effort(security.effort)
+        ),
+        None => println!("  {DIM}security{RESET}          skipped"),
+    }
+
+    let calls = events
+        .iter()
+        .filter(|event| {
+            matches!(event, RouteLedgerEvent::ModelCall { route_id: Some(id), .. } if id == route_id)
+        })
+        .collect::<Vec<_>>();
+    let mut total = 0.0;
+    let mut unknown = 0usize;
+    println!("  {DIM}model calls{RESET}       {}", calls.len());
+    for call in calls {
+        if let RouteLedgerEvent::ModelCall {
+            role,
+            requested_backend,
+            requested_model,
+            actual_model,
+            provider,
+            requested_effort,
+            effective_effort,
+            effort_status,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            cost_usd,
+            cost_source,
+            duration_ms,
+            status,
+            ..
+        } = call
+        {
+            if let Some(cost) = cost_usd {
+                total += cost;
+            } else {
+                unknown += 1;
+            }
+            println!(
+                "    {role}: {}:{} → {} · {} in/{} out/{} cached · {} · {:.1}s · {status}",
+                requested_backend.as_str(),
+                requested_model,
+                actual_model.as_deref().unwrap_or("not reported"),
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                cost_usd
+                    .map(catalog::format_usd)
+                    .unwrap_or_else(|| "$?".into()),
+                *duration_ms as f64 / 1000.0,
+            );
+            if requested_effort.is_some() || effective_effort.is_some() {
+                println!(
+                    "      effort requested={} effective={} ({effort_status}) · provider={} · cost source={cost_source}",
+                    requested_effort.map(|e| e.as_str()).unwrap_or("none"),
+                    effective_effort.as_deref().unwrap_or("none"),
+                    provider.as_deref().unwrap_or("not reported")
+                );
+            }
+        }
+    }
+    let prefix = if unknown > 0 { "≥" } else { "" };
+    println!(
+        "  {DIM}total cost{RESET}        {prefix}{}{}",
+        catalog::format_usd(total),
+        if unknown > 0 {
+            format!(" · {unknown} unknown call(s)")
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "  {DIM}ledger{RESET}            {}",
+        ledger_path(&state.config.workspace_root).display()
+    );
+    Ok(())
+}
+
+fn print_route_spend(state: &AppState) -> Result<()> {
+    let events = read_events(&state.config.workspace_root)?;
+    let mut by_role = std::collections::BTreeMap::<String, (f64, usize, usize)>::new();
+    let mut by_model = std::collections::BTreeMap::<String, (f64, usize, usize)>::new();
+    for event in events {
+        if let RouteLedgerEvent::ModelCall {
+            role,
+            requested_backend,
+            requested_model,
+            actual_model,
+            cost_usd,
+            ..
+        } = event
+        {
+            let entry = by_role.entry(role).or_default();
+            entry.1 += 1;
+            let model_label = actual_model
+                .unwrap_or_else(|| format!("{}:{}", requested_backend.as_str(), requested_model));
+            let model_entry = by_model.entry(model_label).or_default();
+            model_entry.1 += 1;
+            match cost_usd {
+                Some(cost) => {
+                    entry.0 += cost;
+                    model_entry.0 += cost;
+                }
+                None => {
+                    entry.2 += 1;
+                    model_entry.2 += 1;
+                }
+            }
+        }
+    }
+    if by_role.is_empty() {
+        println!("  {DIM}No model-call receipts recorded yet.{RESET}");
+        return Ok(());
+    }
+    println!("  {DIM}route spend by role{RESET}");
+    let mut total = 0.0;
+    let mut unknown = 0usize;
+    for (role, (cost, calls, missing)) in by_role {
+        total += cost;
+        unknown += missing;
+        println!(
+            "  {DIM}{role:<18}{RESET} {:>8} · {calls} call(s){}",
+            catalog::format_usd(cost),
+            if missing > 0 {
+                format!(" · {missing} unknown")
+            } else {
+                String::new()
+            }
+        );
+    }
+    println!("  {DIM}route spend by model{RESET}");
+    for (model, (cost, calls, missing)) in by_model {
+        println!(
+            "  {DIM}{model:<32}{RESET} {:>8} · {calls} call(s){}",
+            catalog::format_usd(cost),
+            if missing > 0 {
+                format!(" · {missing} unknown")
+            } else {
+                String::new()
+            }
+        );
+    }
+    println!(
+        "  {DIM}total{RESET}             {}{}",
+        if unknown > 0 { "≥" } else { "" },
+        catalog::format_usd(total)
+    );
+    Ok(())
 }
 
 fn print_model_ref(label: &str, model: Option<&ModelRef>) {
@@ -292,8 +574,10 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
         },
     };
 
+    let route_id = new_route_id();
+    println!("  {DIM}route id{RESET}          {CYAN}{route_id}{RESET}");
     println!("  {DIM}selector{RESET}          {}", selector.detail());
-    let decision = match run_selector(state, &selector, &task).await {
+    let decision = match run_selector(state, &selector, &task, &route_id).await {
         Ok(decision) => decision,
         Err(e) => {
             println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
@@ -307,6 +591,23 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
             return Ok(());
         }
     };
+
+    let selected_orchestrator = route.orchestrator.cloned();
+    let selected_coder = RoutedModelReceipt {
+        model: route.coder.clone(),
+        effort: route.coder_effort,
+    };
+    let selected_reviewer = route
+        .reviewer
+        .map(|(tier, model, effort)| RoutedReviewReceipt {
+            tier: tier.as_str().to_string(),
+            model: model.clone(),
+            effort,
+        });
+    let selected_security = route.security.map(|(model, effort)| RoutedModelReceipt {
+        model: model.clone(),
+        effort,
+    });
 
     println!(
         "  {DIM}complexity{RESET}        {CYAN}{}{RESET}",
@@ -340,14 +641,24 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
         println!("  {DIM}security{RESET}          skipped");
     }
 
+    let mut applied = false;
     if args.apply {
-        let coder = route.coder.clone();
-        match apply_model_ref(state, &coder, route.coder_effort) {
-            Ok(()) => println!(
-                "  {GREEN}✓{RESET} {DIM}active coding model →{RESET} {CYAN}{}{RESET}{}",
-                state.model,
-                format_active_effort_suffix(state.active_effort)
-            ),
+        let coder = selected_coder.model.clone();
+        match apply_model_ref(state, &coder, selected_coder.effort) {
+            Ok(()) => {
+                applied = true;
+                println!(
+                    "  {GREEN}✓{RESET} {DIM}active coding model →{RESET} {CYAN}{}{RESET}{}",
+                    state.model,
+                    format_active_effort_suffix(state.active_effort)
+                );
+                state.active_route = Some(ActiveRouteContext {
+                    route_id: route_id.clone(),
+                    role: "coder".into(),
+                    backend: coder.backend,
+                    model: coder.model,
+                });
+            }
             Err(e) => {
                 println!("  {RED}✗{RESET} {DIM}selected coder but could not apply it: {e}{RESET}")
             }
@@ -357,6 +668,24 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
             "  {DIM}dry run: active model unchanged ({}){RESET}",
             state.model
         );
+    }
+    let decision_receipt = RouteLedgerEvent::RouteDecision {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        route_id,
+        session_id: session_id(&state.session_path),
+        task_hash: task_hash(&task),
+        task_preview: task_preview(&task),
+        selector,
+        model_system: Box::new(state.config.model_system.clone()),
+        decision,
+        orchestrator: selected_orchestrator,
+        coder: selected_coder,
+        reviewer: Box::new(selected_reviewer),
+        security: Box::new(selected_security),
+        applied,
+    };
+    if let Err(error) = append_event(&state.config.workspace_root, &decision_receipt) {
+        println!("  {YELLOW}!{RESET} {DIM}route decision not recorded: {error}{RESET}");
     }
     Ok(())
 }
@@ -395,7 +724,12 @@ fn resolve_route<'a>(
     })
 }
 
-async fn run_selector(state: &AppState, selector: &ModelRef, task: &str) -> Result<RouteDecision> {
+async fn run_selector(
+    state: &mut AppState,
+    selector: &ModelRef,
+    task: &str,
+    route_id: &str,
+) -> Result<RouteDecision> {
     let backend_desc = state.config.backend_descriptor_for(selector.backend);
     if let Err(e) = validate(&backend_desc) {
         return Err(anyhow!("selector backend is not ready: {e}"));
@@ -422,20 +756,86 @@ async fn run_selector(state: &AppState, selector: &ModelRef, task: &str) -> Resu
     };
     let mut text = String::new();
     let mut reported_cost = None;
-    stream_chat(&state.http, &backend_desc, &req, None, |chunk| {
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut cached_input_tokens = 0;
+    let mut actual_model = None;
+    let mut provider = None;
+    let started = Instant::now();
+    let result = stream_chat(&state.http, &backend_desc, &req, None, |chunk| {
+        if chunk
+            .model
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            actual_model = chunk.model.clone();
+        }
+        if chunk
+            .provider
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            provider = chunk.provider.clone();
+        }
         if let Some(choice) = chunk.choices.first() {
             if let Some(content) = &choice.delta.content {
                 text.push_str(content);
             }
         }
         if let Some(usage) = &chunk.usage {
+            input_tokens += usage.prompt_tokens;
+            output_tokens += usage.completion_tokens;
+            cached_input_tokens += usage.cached_tokens();
             if let Some(cost) = usage.cost {
                 reported_cost = Some(cost);
             }
         }
     })
-    .await?;
-    if let Some(cost) = reported_cost {
+    .await;
+    let catalog_cost = catalog::turn_cost_usd(
+        selector.backend,
+        actual_model.as_deref().unwrap_or(&selector.model),
+        input_tokens,
+        output_tokens,
+    );
+    let (cost, cost_source) = if let Some(cost) = reported_cost {
+        (Some(cost), "provider-reported")
+    } else if let Some(cost) = catalog_cost {
+        (Some(cost), "catalog-estimate")
+    } else if selector.backend.is_local() {
+        (Some(0.0), "local")
+    } else {
+        (None, "unknown")
+    };
+    let receipt = model_call_event(ModelCallInput {
+        route_id: Some(route_id),
+        session_id: &session_id(&state.session_path),
+        role: "selector",
+        backend: selector.backend,
+        requested_model: &selector.model,
+        actual_model: actual_model.as_deref(),
+        provider: provider.as_deref(),
+        requested_effort: selector.effort,
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        cost_usd: cost,
+        cost_source,
+        duration_ms: started.elapsed().as_millis() as u64,
+        status: if result.is_ok() { "ok" } else { "error" },
+    });
+    if let Err(error) = append_event(&state.config.workspace_root, &receipt) {
+        println!("  {YELLOW}!{RESET} {DIM}selector receipt not recorded: {error}{RESET}");
+    }
+    match cost {
+        Some(cost) => state.session_usd += cost,
+        None if !selector.backend.is_local() && (input_tokens > 0 || output_tokens > 0) => {
+            state.session_cost_has_unknown = true;
+        }
+        None => {}
+    }
+    result?;
+    if let Some(cost) = cost {
         println!(
             "  {DIM}selector cost{RESET}    {}",
             catalog::format_usd(cost)
@@ -646,10 +1046,12 @@ pub(super) fn apply_model_ref(
     let previous_backend_desc = state.backend.clone();
     let previous_model = state.model.clone();
     let previous_effort = state.active_effort;
+    let previous_active_route = state.active_route.clone();
 
     state.config.backend = model.backend;
     state.config.model_override = Some(model.model.clone());
     state.active_effort = effort_override.or(model.effort);
+    state.active_route = None;
     match state.rebuild_client() {
         Ok(()) => {
             state.resolve_model();
@@ -662,6 +1064,7 @@ pub(super) fn apply_model_ref(
             state.backend = previous_backend_desc;
             state.model = previous_model;
             state.active_effort = previous_effort;
+            state.active_route = previous_active_route;
             Err(e)
         }
     }
@@ -696,6 +1099,19 @@ mod tests {
                 apply: false,
                 task: Some("add auth".into())
             }))
+        );
+        assert_eq!(
+            parse_route_args("history"),
+            Some(RouteInvocation::History(10))
+        );
+        assert_eq!(
+            parse_route_args("history 25"),
+            Some(RouteInvocation::History(25))
+        );
+        assert_eq!(parse_route_args("spend"), Some(RouteInvocation::Spend));
+        assert_eq!(
+            parse_route_args("explain route-123"),
+            Some(RouteInvocation::Explain(Some("route-123".into())))
         );
     }
 

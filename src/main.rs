@@ -41,6 +41,7 @@ mod project_memory;
 mod prompt_library;
 mod recommend;
 mod renderer;
+mod route_audit;
 mod rubric;
 mod scorecard;
 mod session;
@@ -843,6 +844,7 @@ async fn main() -> anyhow::Result<()> {
         backend: backend_desc,
         model,
         active_effort: None,
+        active_route: None,
         messages: Vec::new(),
         session_dir: session_dir.clone(),
         session_path: session_path.clone(),

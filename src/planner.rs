@@ -77,6 +77,9 @@ pub struct RoutedPlan {
     pub version: u8,
     pub goal: String,
     pub created_at: String,
+    /// Correlates planner and executor model-call receipts in routes.jsonl.
+    #[serde(default)]
+    pub route_id: Option<String>,
     #[serde(default)]
     pub planner: Option<ModelRef>,
     pub tasks: Vec<RoutedPlanTask>,
@@ -335,6 +338,7 @@ fn routed_plan_from_value(
         version: 1,
         goal,
         created_at: Utc::now().to_rfc3339(),
+        route_id: None,
         planner,
         tasks,
     })

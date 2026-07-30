@@ -172,6 +172,13 @@ pub struct StreamOptions {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StreamChunk {
+    /// Provider-resolved model id. Dynamic routers may return a different id
+    /// from the one requested, so receipts must preserve both.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Hosting provider selected by an upstream router, when reported.
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub choices: Vec<StreamChoice>,
     #[serde(default)]
@@ -811,6 +818,20 @@ mod tests {
             SseEvent::Chunk(c) => {
                 let u = c.usage.as_ref().unwrap();
                 assert_eq!(u.cost, Some(0.0015));
+            }
+            _ => panic!("expected chunk"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_carries_resolved_model_and_provider() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"model\":\"anthropic/claude-test\",\"provider\":\"anthropic\",\"choices\":[]}\n\n";
+        let events = p.feed(bytes).unwrap();
+        match &events[0] {
+            SseEvent::Chunk(c) => {
+                assert_eq!(c.model.as_deref(), Some("anthropic/claude-test"));
+                assert_eq!(c.provider.as_deref(), Some("anthropic"));
             }
             _ => panic!("expected chunk"),
         }

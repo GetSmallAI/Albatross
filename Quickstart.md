@@ -152,6 +152,8 @@ Useful commands:
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions
 /fusion tool  attach Fusion deliberation to an OpenRouter coding model
 /route select choose low/medium/high models for a task from your model stack
+/route explain show why the latest route was chosen and what actually ran
+/route spend aggregate routed cost by role and resolved model
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
 /sessions search dispatch
@@ -352,6 +354,9 @@ You can still run the operator commands manually:
 /route template
 /route select --dry-run add OAuth login and tests
 /route apply coder high
+/route explain
+/route history 10
+/route spend
 /session
 /test smart
 ```

@@ -4,6 +4,8 @@ target/
 # Committable project config (prompt.md, spec.md, rubric.md) is intentionally NOT ignored.
 .albatross/continue.md
 .albatross/auto-report.md
+# Per-project routing receipts can contain task previews and usage metadata.
+.albatross/routes.jsonl
 .env
 .env.local
 *.log

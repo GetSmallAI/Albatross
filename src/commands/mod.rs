@@ -65,6 +65,10 @@ use crate::prompt_library::{
 use crate::recommend::{
     apply_recommendation_to_config, recommend_models, ModelCandidate, ModelRecommendation,
 };
+use crate::route_audit::{
+    append_event as append_route_event, model_call_event, new_route_id, session_id,
+    ActiveRouteContext, ModelCallInput,
+};
 use crate::session::{
     delete_session, list_sessions, load_messages, load_session, load_session_metadata,
     render_markdown, resolve_session_path, save_message, save_session_metadata, search_sessions,
@@ -215,7 +219,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/route",
-        "Select or apply a multi-model stack route for the task",
+        "Select, explain, audit, or apply a multi-model stack route",
     ),
     (
         "/context",
@@ -385,6 +389,7 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
     state.backend = backend_desc;
     state.model = model;
     state.active_effort = None;
+    state.active_route = None;
     state.session_dir = state.config.session_dir.clone();
     if state.session_dir != old_session_dir {
         fs::create_dir_all(&state.session_dir)?;
@@ -864,7 +869,7 @@ async fn cmd_plan(args: &str, state: &mut AppState) -> Result<()> {
 }
 
 async fn cmd_plan_route(
-    state: &AppState,
+    state: &mut AppState,
     intent: &str,
     export_path: Option<PathBuf>,
     planner_choice: Option<PlannerChoice>,
@@ -883,6 +888,8 @@ async fn cmd_plan_route(
         return Ok(());
     }
 
+    let route_id = new_route_id();
+    println!("  {DIM}route id{RESET}          {CYAN}{route_id}{RESET}");
     println!(
         "  {DIM}routing plan with{RESET} {}",
         planner.detail_with_effort(planner.effort)
@@ -914,13 +921,36 @@ async fn cmd_plan_route(
     };
     let mut draft = String::new();
     let mut reported_cost = None;
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut cached_input_tokens = 0;
+    let mut actual_model = None;
+    let mut provider = None;
+    let started = Instant::now();
     let result = stream_chat(&state.http, &backend_desc, &req, None, |chunk| {
+        if chunk
+            .model
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            actual_model = chunk.model.clone();
+        }
+        if chunk
+            .provider
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            provider = chunk.provider.clone();
+        }
         if let Some(choice) = chunk.choices.first() {
             if let Some(content) = &choice.delta.content {
                 draft.push_str(content);
             }
         }
         if let Some(usage) = &chunk.usage {
+            input_tokens += usage.prompt_tokens;
+            output_tokens += usage.completion_tokens;
+            cached_input_tokens += usage.cached_tokens();
             if let Some(cost) = usage.cost {
                 reported_cost = Some(cost);
             }
@@ -928,7 +958,49 @@ async fn cmd_plan_route(
     })
     .await;
 
-    if let Some(cost) = reported_cost {
+    let catalog_cost = catalog::turn_cost_usd(
+        planner.backend,
+        actual_model.as_deref().unwrap_or(&planner.model),
+        input_tokens,
+        output_tokens,
+    );
+    let (planner_cost, cost_source) = if let Some(cost) = reported_cost {
+        (Some(cost), "provider-reported")
+    } else if let Some(cost) = catalog_cost {
+        (Some(cost), "catalog-estimate")
+    } else if planner.backend.is_local() {
+        (Some(0.0), "local")
+    } else {
+        (None, "unknown")
+    };
+    let receipt = model_call_event(ModelCallInput {
+        route_id: Some(&route_id),
+        session_id: &session_id(&state.session_path),
+        role: "planner",
+        backend: planner.backend,
+        requested_model: &planner.model,
+        actual_model: actual_model.as_deref(),
+        provider: provider.as_deref(),
+        requested_effort: planner.effort,
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        cost_usd: planner_cost,
+        cost_source,
+        duration_ms: started.elapsed().as_millis() as u64,
+        status: if result.is_ok() { "ok" } else { "error" },
+    });
+    if let Err(error) = append_route_event(&state.config.workspace_root, &receipt) {
+        println!("  {YELLOW}!{RESET} {DIM}planner receipt not recorded: {error}{RESET}");
+    }
+    match planner_cost {
+        Some(cost) => state.session_usd += cost,
+        None if !planner.backend.is_local() && (input_tokens > 0 || output_tokens > 0) => {
+            state.session_cost_has_unknown = true;
+        }
+        None => {}
+    }
+    if let Some(cost) = planner_cost {
         println!(
             "  {DIM}planner cost{RESET}     {}",
             catalog::format_usd(cost)
@@ -945,13 +1017,14 @@ async fn cmd_plan_route(
         Ok(_) => Err(anyhow!("planner returned an empty routed plan")),
         Err(e) => Err(anyhow!("planner request failed: {e}")),
     };
-    let plan = match plan {
+    let mut plan = match plan {
         Ok(plan) => plan,
         Err(e) => {
             println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
             return Ok(());
         }
     };
+    plan.route_id = Some(route_id);
 
     print_routed_plan_summary(&plan);
     let out_path = export_path.unwrap_or_else(|| default_path.to_path_buf());
@@ -1129,6 +1202,12 @@ async fn cmd_plan_execute(state: &mut AppState, path: &Path, args: PlanExecuteAr
             stopped_on_error = true;
             break;
         }
+        state.active_route = Some(ActiveRouteContext {
+            route_id: plan.route_id.clone().unwrap_or_else(new_route_id),
+            role: task.role.clone(),
+            backend: model.backend,
+            model: model.model.clone(),
+        });
 
         let prompt = render_routed_task_prompt(&plan, &task);
         match run_user_turn(
@@ -1199,6 +1278,7 @@ struct ActiveModelSnapshot {
     backend_desc: BackendDescriptor,
     model: String,
     active_effort: Option<EffortLevel>,
+    active_route: Option<ActiveRouteContext>,
     warmed_fingerprint: Option<u64>,
 }
 
@@ -1210,6 +1290,7 @@ impl ActiveModelSnapshot {
             backend_desc: state.backend.clone(),
             model: state.model.clone(),
             active_effort: state.active_effort,
+            active_route: state.active_route.clone(),
             warmed_fingerprint: state.warmed_fingerprint,
         }
     }
@@ -1220,6 +1301,7 @@ impl ActiveModelSnapshot {
         state.backend = self.backend_desc;
         state.model = self.model;
         state.active_effort = self.active_effort;
+        state.active_route = self.active_route;
         state.warmed_fingerprint = self.warmed_fingerprint;
         state.rebuild_client()
     }
@@ -1507,6 +1589,7 @@ mod tests {
             backend: backend(config.backend),
             model: "test-model".into(),
             active_effort: None,
+            active_route: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

@@ -164,6 +164,8 @@ struct CallState {
 
 fn one_content_chunk(delta: String) -> StreamChunk {
     StreamChunk {
+        model: None,
+        provider: None,
         choices: vec![StreamChoice {
             delta: StreamDelta {
                 content: Some(delta),
@@ -177,6 +179,8 @@ fn one_content_chunk(delta: String) -> StreamChunk {
 
 fn one_reasoning_chunk(delta: String) -> StreamChunk {
     StreamChunk {
+        model: None,
+        provider: None,
         choices: vec![StreamChoice {
             delta: StreamDelta {
                 content: None,
@@ -195,6 +199,8 @@ fn one_tool_chunk(
     args: Option<String>,
 ) -> StreamChunk {
     StreamChunk {
+        model: None,
+        provider: None,
         choices: vec![StreamChoice {
             delta: StreamDelta {
                 content: None,
@@ -215,6 +221,8 @@ fn one_tool_chunk(
 
 fn usage_chunk(input: u32, output: u32, cached: u32) -> StreamChunk {
     StreamChunk {
+        model: None,
+        provider: None,
         choices: Vec::new(),
         usage: Some(Usage {
             prompt_tokens: input,

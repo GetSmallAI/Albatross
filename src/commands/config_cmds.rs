@@ -712,6 +712,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     state.config.backend = chosen;
     state.config.model_override = None;
     state.active_effort = None;
+    state.active_route = None;
     state.rebuild_client()?;
     state.resolve_model();
     println!(
@@ -811,6 +812,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         };
         state.config.model_override = Some(model_override);
         state.active_effort = None;
+        state.active_route = None;
         state.resolve_model();
         println!(
             "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
@@ -938,6 +940,7 @@ async fn apply_interactive_model_choice(
 fn apply_model_choice(state: &mut AppState, model_override: Option<String>) {
     state.config.model_override = model_override;
     state.active_effort = None;
+    state.active_route = None;
     state.resolve_model();
     println!(
         "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
@@ -1221,6 +1224,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
             state.config.backend = BackendName::Openrouter;
             state.config.model_override = Some(FUSION_MODEL.into());
             state.active_effort = None;
+            state.active_route = None;
             state.config.openrouter.fusion.enabled = false;
             state.rebuild_client()?;
             state.resolve_model();
@@ -1250,6 +1254,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
             state.config.backend = BackendName::Openrouter;
             state.config.model_override = Some(model);
             state.active_effort = None;
+            state.active_route = None;
             {
                 let fusion = &mut state.config.openrouter.fusion;
                 fusion.enabled = true;
@@ -1282,6 +1287,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
                 state.config.model_override = None;
             }
             state.active_effort = None;
+            state.active_route = None;
             state.backend.openrouter = state.config.openrouter.clone();
             state.resolve_model();
             state.warmed_fingerprint = None;
@@ -1317,6 +1323,7 @@ mod tests {
             backend: backend(config.backend),
             model: "test-model".into(),
             active_effort: None,
+            active_route: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

@@ -281,6 +281,7 @@ mod tests {
             backend: config.backend_descriptor(),
             model: "test-model".into(),
             active_effort: None,
+            active_route: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path: session_path.clone(),

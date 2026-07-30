@@ -84,6 +84,10 @@ pub struct RunResult {
     /// across this turn's steps (0 when the provider reports no cache details).
     pub cached_input_tokens: u32,
     pub reported_cost_usd: Option<f64>,
+    /// Last provider-resolved model/provider observed across the streamed
+    /// steps. These differ from the requested id for dynamic routers.
+    pub actual_model: Option<String>,
+    pub provider: Option<String>,
     pub transcript_rewritten: bool,
     pub conversation_summary: Option<String>,
     /// True when the loop stopped because it hit `max_steps` while the model
@@ -316,6 +320,8 @@ where
     let mut total_out: u32 = 0;
     let mut total_cached: u32 = 0;
     let mut reported_cost_usd: Option<f64> = None;
+    let mut actual_model: Option<String> = None;
+    let mut provider: Option<String> = None;
     // Prefix identity is fixed for the turn (system message + model are stable
     // across steps), so derive OpenAI's cache-routing key once and reuse it.
     let cache_key = crate::openai::session_cache_key(backend, model, &messages);
@@ -369,6 +375,20 @@ where
         let mut step_reported_cost_usd: Option<f64> = None;
 
         stream_chat(http, backend, &req, cancel.clone(), |chunk| {
+            if chunk
+                .model
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            {
+                actual_model = chunk.model.clone();
+            }
+            if chunk
+                .provider
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            {
+                provider = chunk.provider.clone();
+            }
             if let Some(choice) = chunk.choices.first() {
                 if let Some(reasoning) = &choice.delta.reasoning {
                     if !saw_first_token {
@@ -1023,6 +1043,8 @@ where
         output_tokens: total_out,
         cached_input_tokens: total_cached,
         reported_cost_usd,
+        actual_model,
+        provider,
         transcript_rewritten,
         conversation_summary,
         hit_step_limit,
