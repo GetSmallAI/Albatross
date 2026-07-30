@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Replaced the legacy Small Harness terminal wordmark with an Albatross
+  wordmark and corrected remaining present-tense README references.
 - Selector and routed-planner calls now contribute to session cost accounting,
   and routed coding/plan-execution turns are correlated back to their route ID.
 - The supported Rust minimum is now declared and continuously tested as 1.86,

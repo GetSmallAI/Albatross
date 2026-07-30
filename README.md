@@ -429,8 +429,8 @@ Run `/help` in the harness for the full list with descriptions.
 
 ### Credentials with `/auth` and `/login`
 
-API-key cloud backends authenticate with API keys. Paste them once and Small
-Harness stores them at `~/.config/albatross/auth.json` (mode `0600`).
+API-key cloud backends authenticate with API keys. Paste them once and
+Albatross stores them at `~/.config/albatross/auth.json` (mode `0600`).
 Environment variables always win at lookup time, so CI and scripted users see
 no change in behavior.
 
@@ -682,8 +682,8 @@ keep `checkpoints.enabled` on for an unattended run.
 
 ### Project-specific system prompt
 
-Drop a markdown file at `.albatross/prompt.md` in your repo and Small
-Harness prepends it to the system prompt every turn. Use it for project
+Drop a markdown file at `.albatross/prompt.md` in your repo and Albatross
+prepends it to the system prompt every turn. Use it for project
 conventions ("snake_case everywhere", "ship via `make release`", "never
 edit `vendor/`"). Auto-truncated at 8 KB.
 
