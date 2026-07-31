@@ -462,6 +462,9 @@ impl TuiRenderer {
                 self.end_answer();
                 self.render_tool_call(&name, &call_id, args, depth)
             }
+            // Progress is rendered by the session loader. Keeping this out of
+            // the transcript avoids duplicate tool rows.
+            AgentEvent::ToolExecutionStarted { .. } => {}
             AgentEvent::ToolResult {
                 name,
                 call_id,

@@ -13,6 +13,34 @@ use crate::config::AgentConfig;
 use crate::openai::{build_http_client, ChatMessage};
 use crate::tools::{build_tools_for_names, SubagentTool, Tool};
 
+struct AllowApproval;
+
+#[async_trait::async_trait]
+impl crate::agent::ApprovalProvider for AllowApproval {
+    async fn approve(
+        &mut self,
+        _name: &str,
+        _args: &serde_json::Value,
+        _preview: Option<&crate::tools::ToolPreview>,
+    ) -> bool {
+        true
+    }
+}
+
+struct DenyApproval;
+
+#[async_trait::async_trait]
+impl crate::agent::ApprovalProvider for DenyApproval {
+    async fn approve(
+        &mut self,
+        _name: &str,
+        _args: &serde_json::Value,
+        _preview: Option<&crate::tools::ToolPreview>,
+    ) -> bool {
+        false
+    }
+}
+
 fn mock_backend(listener: &TcpListener) -> BackendDescriptor {
     BackendDescriptor {
         name: BackendName::Ollama,
@@ -123,6 +151,114 @@ async fn read_and_explain_mock_loop() {
     let checks = evaluate_checks(&fixture_workspace(), &fixture.checks, &run, &tool_calls);
     assert!(checks.iter().all(|c| c.passed), "{checks:?}");
     assert!(!run.hit_step_limit);
+}
+
+#[tokio::test]
+async fn execution_status_follows_approval() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_desc = mock_backend(&listener);
+    let tool_call_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"true\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_mock_server(listener, vec![tool_call_body, answer_body]);
+
+    let mut config = AgentConfig::default();
+    config.workspace_root = fixture_workspace().display().to_string();
+    config.approval_policy = crate::config::ApprovalPolicy::Always;
+    config.tools = vec!["shell".into()];
+    config.tool_selection = crate::config::ToolSelection::Fixed;
+    let tools = build_tools_for_names(&config, &config.tools, None);
+    let http = build_http_client();
+    let mut events = Vec::new();
+    let mut approval = AllowApproval;
+
+    run_agent(
+        &http,
+        &backend_desc,
+        "mock",
+        None,
+        vec![ChatMessage::User {
+            content: "Run true.".into(),
+        }],
+        tools,
+        4,
+        |event| match event {
+            AgentEvent::ToolCall { .. } => events.push("announced"),
+            AgentEvent::ToolExecutionStarted { .. } => events.push("running"),
+            _ => {}
+        },
+        Some(&mut approval),
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    server.join().unwrap();
+    assert_eq!(events, ["announced", "running"]);
+}
+
+#[tokio::test]
+async fn denied_tool_never_emits_execution_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_desc = mock_backend(&listener);
+    let tool_call_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"true\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Denied.\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_mock_server(listener, vec![tool_call_body, answer_body]);
+
+    let mut config = AgentConfig::default();
+    config.workspace_root = fixture_workspace().display().to_string();
+    config.approval_policy = crate::config::ApprovalPolicy::Always;
+    config.tools = vec!["shell".into()];
+    config.tool_selection = crate::config::ToolSelection::Fixed;
+    let tools = build_tools_for_names(&config, &config.tools, None);
+    let http = build_http_client();
+    let mut execution_started = false;
+    let mut approval = DenyApproval;
+
+    run_agent(
+        &http,
+        &backend_desc,
+        "mock",
+        None,
+        vec![ChatMessage::User {
+            content: "Run true.".into(),
+        }],
+        tools,
+        4,
+        |event| {
+            execution_started |= matches!(event, AgentEvent::ToolExecutionStarted { .. });
+        },
+        Some(&mut approval),
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    server.join().unwrap();
+    assert!(!execution_started);
 }
 
 #[tokio::test]

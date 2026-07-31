@@ -795,6 +795,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             }
             if let AgentEvent::ToolCall { name, .. } = &e {
                 tool_calls.push(name.clone());
+            }
+            if let AgentEvent::ToolExecutionStarted { name, .. } = &e {
                 if let Some(loader) = loader_opt.as_mut() {
                     loader.set_text(format!("Running {name}…"));
                 } else {
