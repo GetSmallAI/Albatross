@@ -270,6 +270,13 @@ fn print_login_provider_error(action: &str, args: &str, resolve: LoginProviderRe
     }
 }
 
+fn should_use_cli_credentials(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    )
+}
+
 pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result<()> {
     let resolve = resolve_login_provider(args, state.active_backend());
     let LoginProviderResolve::Provider(provider) = resolve else {
@@ -289,6 +296,37 @@ pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result
     };
     println!("  {BOLD}{title}{RESET}");
     println!("  {DIM}{note}{RESET}");
+    let cli_credentials = match provider {
+        "grok" if crate::xai_oauth::load_grok_cli_credentials().is_some() => {
+            Some(("Grok", "~/.grok/auth.json"))
+        }
+        "openai-codex" if crate::codex_oauth::load_codex_cli_credentials().is_some() => {
+            Some(("Codex", "~/.codex/auth.json"))
+        }
+        _ => None,
+    };
+    if let Some((cli_name, cli_path)) = cli_credentials {
+        println!("  Found existing {cli_name} CLI credentials in {cli_path}.");
+        let pick =
+            plain_read_line("  Use them instead of a new OAuth login? [Y/n]: ".into()).await?;
+        if should_use_cli_credentials(&pick) {
+            let path = match provider {
+                "grok" => crate::xai_oauth::import_grok_cli_credentials(state.http()).await?,
+                "openai-codex" => {
+                    crate::codex_oauth::import_codex_cli_credentials(state.http()).await?
+                }
+                _ => None,
+            };
+            if let Some(path) = path {
+                println!(
+                    "  {GREEN}✓{RESET} {DIM}logged in to {provider}; saved to {}{RESET}",
+                    path.display()
+                );
+                state.after_login()?;
+                return Ok(());
+            }
+        }
+    }
     println!("  {DIM}1) Browser login (default){RESET}");
     println!("  {DIM}2) Device-code login (headless/SSH){RESET}");
     let pick = plain_read_line(format!("  {DIM}Select [1]: {RESET}")).await?;

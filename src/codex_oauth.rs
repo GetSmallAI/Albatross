@@ -276,6 +276,71 @@ fn save_oauth(credential: OAuthCredential) -> Result<PathBuf> {
     auth_file_path().context("no auth file path")
 }
 
+fn token_expiration(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice::<Value>(&decoded)
+        .ok()?
+        .get("exp")?
+        .as_u64()
+}
+
+fn parse_codex_cli_credentials(data: &Value) -> Option<OAuthCredential> {
+    let tokens = data.get("tokens").unwrap_or(data);
+    let access = tokens.get("access_token")?.as_str()?.to_string();
+    if access.is_empty() {
+        return None;
+    }
+    let refresh = tokens
+        .get("refresh_token")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let account_id = tokens
+        .get("account_id")
+        .or_else(|| tokens.get("accountId"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| account_id_from_access_token(&access));
+    Some(OAuthCredential {
+        credential_type: "oauth".into(),
+        expires: token_expiration(&access).unwrap_or_else(|| now_secs() + 3600),
+        access,
+        refresh,
+        account_id,
+    })
+}
+
+pub fn load_codex_cli_credentials() -> Option<OAuthCredential> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".codex").join("auth.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_codex_cli_credentials(&serde_json::from_str(&text).ok()?)
+}
+
+pub async fn import_codex_cli_credentials(client: &reqwest::Client) -> Result<Option<PathBuf>> {
+    let Some(existing) = load_codex_cli_credentials() else {
+        return Ok(None);
+    };
+    let credential = if existing.expires <= now_secs() + 60 {
+        if existing.refresh.is_empty() {
+            println!("  Stored Codex CLI token is expired and has no refresh token.");
+            return Ok(None);
+        }
+        match refresh_oauth(client, &existing.refresh).await {
+            Ok(refreshed) => refreshed,
+            Err(e) => {
+                println!("  Could not refresh Codex CLI credentials ({e}); starting fresh login.");
+                return Ok(None);
+            }
+        }
+    } else {
+        existing
+    };
+    save_oauth(credential).map(Some)
+}
+
 pub async fn login_browser(client: &reqwest::Client) -> Result<OAuthCredential> {
     let (verifier, challenge) = pkce_pair();
     let state = random_hex(16);
@@ -455,5 +520,21 @@ mod tests {
         );
         assert_eq!(code.as_deref(), Some("abc 123"));
         assert_eq!(state.as_deref(), Some("st"));
+    }
+
+    #[test]
+    fn parses_codex_cli_credentials() {
+        let auth = serde_json::json!({
+            "tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "account_id": "account"
+            }
+        });
+
+        let credential = parse_codex_cli_credentials(&auth).expect("credential");
+        assert_eq!(credential.access, "access");
+        assert_eq!(credential.refresh, "refresh");
+        assert_eq!(credential.account_id.as_deref(), Some("account"));
     }
 }
