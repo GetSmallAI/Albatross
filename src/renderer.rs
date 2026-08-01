@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Write;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
@@ -346,6 +346,7 @@ struct PendingCall {
     name: String,
     args: Value,
     output: Option<String>,
+    duration: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +362,8 @@ struct ToolLifecycleCall {
     call_id: String,
     args: Value,
     state: ToolLifecycleState,
+    started_at: Option<Instant>,
+    duration: Option<Duration>,
 }
 
 struct ActivityFrame {
@@ -410,18 +413,22 @@ impl ToolLifecycle {
             call_id: call_id.to_string(),
             args,
             state: ToolLifecycleState::Queued,
+            started_at: None,
+            duration: None,
         });
     }
 
     fn execution_started(&mut self, call_id: &str) {
         if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
             call.state = ToolLifecycleState::Running;
+            call.started_at.get_or_insert_with(Instant::now);
         }
     }
 
     fn execution_finished(&mut self, call_id: &str) {
         if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
             call.state = ToolLifecycleState::Finished;
+            call.duration = call.started_at.map(|started| started.elapsed());
         }
     }
 
@@ -438,16 +445,23 @@ impl ToolLifecycle {
             name: call.name,
             args: call.args,
             output: None,
+            duration: call.duration,
         })
     }
 
     fn drain(&mut self) -> Vec<PendingCall> {
         self.calls
             .drain(..)
-            .map(|call| PendingCall {
-                name: call.name,
-                args: call.args,
-                output: None,
+            .map(|call| {
+                let duration = call
+                    .duration
+                    .or_else(|| call.started_at.map(|started| started.elapsed()));
+                PendingCall {
+                    name: call.name,
+                    args: call.args,
+                    output: None,
+                    duration,
+                }
             })
             .collect()
     }
@@ -533,8 +547,13 @@ fn format_activity_row(call: &ToolLifecycleCall) -> String {
 fn format_grouped_receipt(call: &PendingCall) -> String {
     let label = label_past(&call.name);
     let arg_str = formatter_for(&call.name, &call.args);
+    let duration = call
+        .duration
+        .filter(|duration| *duration >= Duration::from_secs(1))
+        .map(|duration| format!("  {GRAY}· {:.1}s{RESET}", duration.as_secs_f64()))
+        .unwrap_or_default();
     let mut rows = vec![format!(
-        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}"
+        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}{duration}"
     )];
     if let Some(output) = &call.output {
         let summary = summarize_output(output);
@@ -1344,6 +1363,22 @@ mod verbose_tests {
     }
 
     #[test]
+    fn tool_lifecycle_carries_execution_duration_into_its_receipt() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({"command": "cargo test"}),
+        );
+        lifecycle.execution_started("shell");
+        lifecycle.execution_finished("shell");
+
+        let completed = lifecycle.take_result("shell").expect("known tool call");
+
+        assert!(completed.duration.is_some());
+    }
+
+    #[test]
     fn tool_lifecycle_marks_denied_calls_as_skipped_not_completed() {
         let mut lifecycle = ToolLifecycle::default();
         lifecycle.announce(
@@ -1427,6 +1462,7 @@ mod verbose_tests {
             name: "grep".into(),
             args: serde_json::json!({"pattern": "test"}),
             output: Some(r#"{"count":3,"matches":[]}"#.into()),
+            duration: None,
         };
 
         let receipt = format_grouped_receipt(&call);
@@ -1445,6 +1481,38 @@ mod verbose_tests {
             receipt.ends_with("\r\n"),
             "receipt leaves the cursor at column zero"
         );
+    }
+
+    #[test]
+    fn slow_grouped_receipt_surfaces_a_quiet_duration() {
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "cargo test"}),
+            output: Some(r#"{"exit_code":0}"#.into()),
+            duration: Some(std::time::Duration::from_millis(2_400)),
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(
+            receipt.contains("· 2.4s"),
+            "slow duration missing: {receipt:?}"
+        );
+    }
+
+    #[test]
+    fn fast_grouped_receipt_omits_duration_noise() {
+        let call = PendingCall {
+            name: "file_read".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(r#"{"lines":41}"#.into()),
+            duration: Some(std::time::Duration::from_millis(999)),
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(!receipt.contains("· 0.9s"));
+        assert!(!receipt.contains("· 1.0s"));
     }
 
     #[test]
