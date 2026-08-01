@@ -124,14 +124,22 @@ pub async fn read_composer_with_history_outcome(
     history: Vec<String>,
     commands: Vec<(String, String)>,
     footer: ComposerFooter,
+    details: Option<ComposerDetails>,
 ) -> Result<ReadLineOutcome> {
-    tokio::task::spawn_blocking(move || read_composer_outcome(&history, &commands, footer)).await?
+    tokio::task::spawn_blocking(move || read_composer_outcome(&history, &commands, footer, details))
+        .await?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerFooter {
     KeyboardHint,
     Session(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerDetails {
+    pub body: String,
+    pub expanded_by_default: bool,
 }
 
 fn render_value(value: &str) -> String {
@@ -144,6 +152,13 @@ struct ComposerFrame {
     rows: usize,
     cursor_row: usize,
     cursor_col: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ComposerPresentation<'a> {
+    footer: &'a ComposerFooter,
+    details: Option<&'a str>,
+    details_expanded: bool,
 }
 
 #[derive(Debug, Default)]
@@ -211,9 +226,14 @@ fn render_composer(
     commands: &[(String, String)],
     sel: usize,
     dismissed: bool,
-    footer: &ComposerFooter,
+    presentation: ComposerPresentation<'_>,
     term_cols: usize,
 ) -> ComposerFrame {
+    let ComposerPresentation {
+        footer,
+        details,
+        details_expanded,
+    } = presentation;
     let width = term_cols.max(20);
     let rule = if crate::theme::ascii_enabled() {
         "-"
@@ -246,7 +266,21 @@ fn render_composer(
         .and_then(|(name, _)| name.strip_prefix(value.as_str()))
         .unwrap_or("");
 
-    let mut text = format!("{MUTED}{top_prefix}{top_fill}{RESET}");
+    let expanded_details = details.filter(|_| details_expanded);
+    let detail_rows = expanded_details
+        .map(|value| value.lines().count() + 1)
+        .unwrap_or(0);
+    let mut text = String::new();
+    if let Some(details) = expanded_details {
+        for (index, line) in details.lines().enumerate() {
+            if index > 0 {
+                text.push_str("\r\n");
+            }
+            text.push_str(&crate::theme::truncate_visible(line, width));
+        }
+        text.push_str("\r\n\r\n");
+    }
+    text.push_str(&format!("{MUTED}{top_prefix}{top_fill}{RESET}"));
     for (index, editor_line) in editor_lines.iter().enumerate() {
         let indicator = if index == 0 {
             format!("{ACCENT}{PROMPT_CHAR}{RESET} ")
@@ -305,18 +339,34 @@ fn render_composer(
         }
     }
 
-    let footer_text = match footer {
+    let base_footer = match footer {
         ComposerFooter::KeyboardHint if width < 46 => "Enter send · ^J newline",
         ComposerFooter::KeyboardHint => "Enter send · Ctrl+J newline",
         ComposerFooter::Session(context) => context,
+    };
+    let footer_text = if details.is_some() {
+        let shortcut = if width < 46 {
+            if details_expanded {
+                "^O hide"
+            } else {
+                "^O details"
+            }
+        } else if details_expanded {
+            "Ctrl+O hide"
+        } else {
+            "Ctrl+O details"
+        };
+        format!("{shortcut} · {base_footer}")
+    } else {
+        base_footer.to_string()
     };
     let footer = truncate(&format!("{PAD}{bottom_left} {footer_text}"), width);
     text.push_str(&format!("\r\n{MUTED}{footer}{RESET}"));
 
     ComposerFrame {
         text,
-        rows: 1 + editor_lines.len() + menu_rows + 1,
-        cursor_row: 1 + cursor_line,
+        rows: detail_rows + 1 + editor_lines.len() + menu_rows + 1,
+        cursor_row: detail_rows + 1 + cursor_line,
         cursor_col: editor_col + cursor_in_line,
     }
 }
@@ -361,6 +411,8 @@ enum InputSurface {
     Composer {
         region: ComposerRegion,
         footer: ComposerFooter,
+        details: Option<String>,
+        details_expanded: bool,
     },
 }
 
@@ -389,13 +441,22 @@ impl InputSurface {
                 view.dismissed,
                 view.term_cols,
             ),
-            Self::Composer { region, footer } => region.replace(render_composer(
+            Self::Composer {
+                region,
+                footer,
+                details,
+                details_expanded,
+            } => region.replace(render_composer(
                 view.chars,
                 view.cursor,
                 commands,
                 view.selected,
                 view.dismissed,
-                footer,
+                ComposerPresentation {
+                    footer,
+                    details: details.as_deref(),
+                    details_expanded: *details_expanded,
+                },
                 view.term_cols,
             )),
         }
@@ -430,6 +491,22 @@ impl InputSurface {
                 region.finish(value.as_deref())
             }
         }
+    }
+
+    fn toggle_details(&mut self) -> bool {
+        let Self::Composer {
+            details,
+            details_expanded,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if details.is_none() {
+            return false;
+        }
+        *details_expanded = !*details_expanded;
+        true
     }
 }
 
@@ -612,11 +689,18 @@ fn read_composer_outcome(
     history: &[String],
     commands: &[(String, String)],
     footer: ComposerFooter,
+    details: Option<ComposerDetails>,
 ) -> Result<ReadLineOutcome> {
+    let details_expanded = details
+        .as_ref()
+        .map(|details| details.expanded_by_default)
+        .unwrap_or(false);
     read_line_outcome(
         InputSurface::Composer {
             region: ComposerRegion::default(),
             footer,
+            details: details.map(|details| details.body),
+            details_expanded,
         },
         history,
         commands,
@@ -723,6 +807,11 @@ fn read_line_outcome(
                     return Ok(outcome);
                 }
                 match code {
+                    KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        if surface.toggle_details() {
+                            redraw!();
+                        }
+                    }
                     KeyCode::Enter => {
                         let final_frame = surface.finish(
                             EditorView {
@@ -1606,7 +1695,11 @@ mod tests {
             commands,
             selected,
             dismissed,
-            &ComposerFooter::KeyboardHint,
+            ComposerPresentation {
+                footer: &ComposerFooter::KeyboardHint,
+                details: None,
+                details_expanded: false,
+            },
             width,
         )
     }
@@ -1632,11 +1725,93 @@ mod tests {
         let chars = Vec::new();
         let footer = ComposerFooter::Session("grok-4.5 · edit · ask · main*".into());
 
-        let frame = render_composer(&chars, 0, &[], 0, false, &footer, 80);
+        let frame = render_composer(
+            &chars,
+            0,
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: None,
+                details_expanded: false,
+            },
+            80,
+        );
 
         assert!(frame.text.contains("╰─ grok-4.5 · edit · ask · main*"));
         assert!(!frame.text.contains("Enter send"));
         assert_eq!(frame.rows, 3);
+    }
+
+    #[test]
+    fn composer_toggles_owned_tool_details_without_losing_the_draft() {
+        let chars: Vec<char> = "draft stays".chars().collect();
+        let footer = ComposerFooter::Session("grok-4.5 · edit · ask · main*".into());
+        let details =
+            "  ● last turn details\n    Ran  command=demo-output · exit 0\n      alpha\n      beta";
+
+        let collapsed = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: Some(details),
+                details_expanded: false,
+            },
+            80,
+        );
+        let expanded = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: Some(details),
+                details_expanded: true,
+            },
+            80,
+        );
+
+        assert!(collapsed.text.contains("Ctrl+O details"));
+        assert!(!collapsed.text.contains("command=demo-output"));
+        assert!(expanded.text.contains("Ctrl+O hide"));
+        assert!(expanded.text.contains("command=demo-output"));
+        assert!(expanded.text.contains("draft stays"));
+        assert_eq!(expanded.cursor_col, collapsed.cursor_col);
+        assert!(expanded.cursor_row > collapsed.cursor_row);
+    }
+
+    #[test]
+    fn expanded_tool_details_never_wrap_beyond_the_owned_terminal_width() {
+        let chars: Vec<char> = "draft".chars().collect();
+        let details = format!("  ● last turn details\n      {}", "x".repeat(100));
+
+        let frame = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &ComposerFooter::KeyboardHint,
+                details: Some(&details),
+                details_expanded: true,
+            },
+            36,
+        );
+
+        for line in frame.text.split("\r\n") {
+            assert!(
+                crate::theme::visible_len(line) <= 36,
+                "composer-owned row wrapped past its tracked width: {line:?}"
+            );
+        }
     }
 
     #[test]

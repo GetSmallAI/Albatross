@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
+use crate::input::ComposerDetails;
 use crate::markdown::{MarkdownInline, MdEvent};
 
 use crate::theme::{
-    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, CHECK, DOT, FAIL, HOOK_STOP,
-    OK, PAD, PENDING, POINT, SUB, TEXT,
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, BRANCH_MID, CHECK, DOT,
+    FAIL, HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
 };
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
@@ -354,11 +355,170 @@ impl StreamWrap {
     }
 }
 
+#[derive(Clone)]
 struct PendingCall {
     name: String,
     args: Value,
     output: Option<String>,
     duration: Option<Duration>,
+}
+
+fn folded_output_lines(call: &PendingCall) -> Vec<String> {
+    let Some(output) = call.output.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    if call.name == "grep" {
+        return parsed
+            .get("matches")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|matched| {
+                let file = matched.get("file").and_then(Value::as_str).unwrap_or("?");
+                let line = matched.get("line").and_then(Value::as_u64).unwrap_or(0);
+                let content = matched.get("content").and_then(Value::as_str).unwrap_or("");
+                format!("{file}:{line}  {content}")
+            })
+            .collect();
+    }
+    let text = match call.name.as_str() {
+        "shell" => parsed.get("output").and_then(Value::as_str),
+        "file_read" => parsed.get("content").and_then(Value::as_str),
+        "run_tests" => parsed.get("outputExcerpt").and_then(Value::as_str),
+        "file_edit" | "apply_patch" => parsed.get("diff").and_then(Value::as_str),
+        _ => None,
+    };
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    if text == "(no output)" {
+        return Vec::new();
+    }
+    text.lines().map(str::to_string).collect()
+}
+
+fn tool_failed(call: &PendingCall) -> bool {
+    let Some(output) = call.output.as_deref() else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    parsed.get("error").is_some()
+        || parsed
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+        || parsed
+            .get("failed")
+            .and_then(Value::as_u64)
+            .is_some_and(|failed| failed > 0)
+        || parsed
+            .get("timedOut")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+struct EvidencePresentation {
+    inline_lines: Vec<String>,
+    hidden_lines: usize,
+    inspectable: bool,
+}
+
+fn evidence_presentation(call: &PendingCall) -> EvidencePresentation {
+    const INLINE_LINES: usize = 6;
+    const INLINE_CHARS: usize = 360;
+    const INLINE_LINE_CHARS: usize = 72;
+
+    let lines = folded_output_lines(call);
+    if lines.is_empty() {
+        return EvidencePresentation {
+            inline_lines: Vec::new(),
+            hidden_lines: 0,
+            inspectable: false,
+        };
+    }
+
+    if tool_failed(call) {
+        let hidden_lines = lines.len().saturating_sub(INLINE_LINES);
+        return EvidencePresentation {
+            inline_lines: lines.into_iter().skip(hidden_lines).collect(),
+            hidden_lines,
+            inspectable: hidden_lines > 0,
+        };
+    }
+
+    let inline_supported = !matches!(call.name.as_str(), "file_edit" | "apply_patch");
+    let inline_fits = lines.len() <= INLINE_LINES
+        && lines.iter().map(|line| line.chars().count()).sum::<usize>() <= INLINE_CHARS
+        && lines
+            .iter()
+            .all(|line| line.chars().count() <= INLINE_LINE_CHARS);
+    if inline_supported && inline_fits {
+        EvidencePresentation {
+            inline_lines: lines,
+            hidden_lines: 0,
+            inspectable: false,
+        }
+    } else {
+        EvidencePresentation {
+            inline_lines: Vec::new(),
+            hidden_lines: lines.len(),
+            inspectable: true,
+        }
+    }
+}
+
+fn format_turn_details(calls: &[PendingCall]) -> Option<ComposerDetails> {
+    let visible = calls
+        .iter()
+        .filter_map(|call| {
+            if !evidence_presentation(call).inspectable {
+                return None;
+            }
+            let output = folded_output_lines(call);
+            (!output.is_empty()).then_some((call, output))
+        })
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return None;
+    }
+
+    let mut details = format!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}last turn details{RESET}");
+    for (call, output) in visible {
+        let failed = tool_failed(call);
+        let summary = call
+            .output
+            .as_deref()
+            .map(summarize_output)
+            .unwrap_or_default();
+        details.push_str(&format!(
+            "\n{PAD}  {GRAY}{}{RESET}  {TEXT}{}{RESET}",
+            label_past(&call.name),
+            formatter_for(&call.name, &call.args)
+        ));
+        if !summary.is_empty() {
+            details.push_str(&format!("  {GRAY}· {summary}{RESET}"));
+        }
+        details.push_str(&format!("\n{PAD}    {GRAY}output{RESET}"));
+        let limit = if failed { 12 } else { 24 };
+        let hidden = output.len().saturating_sub(limit);
+        if hidden > 0 {
+            details.push_str(&format!(
+                "\n{PAD}      {GRAY}… {hidden} earlier lines hidden{RESET}"
+            ));
+        }
+        for line in output.iter().skip(hidden) {
+            details.push_str(&format!("\n{PAD}      {TEXT}{line}{RESET}"));
+        }
+    }
+    Some(ComposerDetails {
+        body: details,
+        expanded_by_default: false,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,7 +834,24 @@ fn receipt_content(call: &PendingCall) -> ReceiptContent {
 /// cursor column somewhere other than the left edge even after their visible
 /// content has been cleared.
 fn format_grouped_receipt(call: &PendingCall) -> String {
-    let content = receipt_content(call);
+    let mut content = receipt_content(call);
+    let evidence = evidence_presentation(call);
+    if evidence.hidden_lines > 0 {
+        let position = if evidence.inline_lines.is_empty() {
+            ""
+        } else {
+            " earlier"
+        };
+        let folded = format!(
+            "{}{position} line{} hidden · Ctrl+O details",
+            evidence.hidden_lines,
+            if evidence.hidden_lines == 1 { "" } else { "s" }
+        );
+        content.child = Some(match content.child {
+            Some(summary) => format!("{summary} · {folded}"),
+            None => folded,
+        });
+    }
     let duration = call
         .duration
         .filter(|duration| *duration >= Duration::from_secs(1))
@@ -685,7 +862,21 @@ fn format_grouped_receipt(call: &PendingCall) -> String {
         content.label, content.detail
     )];
     if let Some(summary) = content.child {
-        rows.push(format!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}"));
+        let branch = if evidence.inline_lines.is_empty() {
+            BRANCH_END
+        } else {
+            BRANCH_MID
+        };
+        rows.push(format!("{PAD}  {GRAY}{branch} {summary}{RESET}"));
+    }
+    if !evidence.inline_lines.is_empty() {
+        rows.push(format!("{PAD}  {GRAY}{BRANCH_END} output{RESET}"));
+        rows.extend(
+            evidence
+                .inline_lines
+                .iter()
+                .map(|line| format!("{PAD}      {TEXT}{}{RESET}", trunc(line, 72))),
+        );
     }
 
     let mut receipt = String::from("\r\n");
@@ -704,6 +895,8 @@ pub struct TuiRenderer {
     tool_lifecycle: ToolLifecycle,
     active_region: ActiveRegion,
     minimal_batch: BTreeMap<String, usize>,
+    turn_detail_calls: Vec<PendingCall>,
+    composer_details: Option<ComposerDetails>,
     /// Per-turn flag: have we already printed the "thinking…" header for the
     /// current burst of reasoning deltas? Reset at end_turn so each turn
     /// gets its own header.
@@ -760,6 +953,8 @@ impl TuiRenderer {
             tool_lifecycle: ToolLifecycle::default(),
             active_region: ActiveRegion::default(),
             minimal_batch: BTreeMap::new(),
+            turn_detail_calls: Vec::new(),
+            composer_details: None,
             reasoning_header_shown: false,
             answer_header_shown: false,
             answer_wrap: None,
@@ -791,6 +986,10 @@ impl TuiRenderer {
 
     pub fn verbose_enabled(&self) -> bool {
         matches!(self.display.tool_display, ToolDisplay::Verbose)
+    }
+
+    pub fn composer_details(&self) -> Option<&ComposerDetails> {
+        self.composer_details.as_ref()
     }
 
     pub fn set_trace(&mut self, on: bool) {
@@ -877,6 +1076,8 @@ impl TuiRenderer {
         self.flush_minimal();
         self.end_reasoning();
         self.end_streaming();
+        self.composer_details = format_turn_details(&self.turn_detail_calls);
+        self.turn_detail_calls.clear();
         self.reasoning_header_shown = false;
         self.answer_header_shown = false;
     }
@@ -1127,6 +1328,7 @@ impl TuiRenderer {
                 if let Some(mut completed) = self.tool_lifecycle.take_result(call_id) {
                     completed.output = Some(output.to_string());
                     self.write_grouped_receipt(&completed);
+                    self.turn_detail_calls.push(completed);
                 }
                 self.redraw_active_region();
             }
@@ -1624,6 +1826,243 @@ mod verbose_tests {
             receipt.contains("· 2.4s"),
             "slow duration missing: {receipt:?}"
         );
+    }
+
+    #[test]
+    fn short_shell_output_is_rendered_inline_beneath_the_receipt() {
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "demo-output"}),
+            output: Some(
+                serde_json::json!({
+                    "output": "alpha\nbeta\ngamma\n",
+                    "exitCode": 0
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("exit 0"));
+        assert!(receipt.contains("└ output"));
+        assert!(receipt.contains("alpha"));
+        assert!(receipt.contains("beta"));
+        assert!(receipt.contains("gamma"));
+        assert!(!receipt.contains("hidden"));
+        assert!(!receipt.contains("Ctrl+O"));
+    }
+
+    #[test]
+    fn long_shell_output_is_available_in_the_last_turn_inspector() {
+        let output = (1..=8)
+            .map(|line| format!("output line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut renderer = TuiRenderer::new(DisplayConfig::default());
+        renderer.render_tool_call(
+            "shell",
+            "shell-call",
+            serde_json::json!({"command": "demo-output"}),
+            0,
+        );
+        renderer.render_tool_execution_started("shell-call", 0);
+        renderer.render_tool_execution_finished("shell-call", 0);
+        renderer.render_tool_result(
+            "shell",
+            "shell-call",
+            &serde_json::json!({
+                "output": output,
+                "exitCode": 0
+            })
+            .to_string(),
+            0,
+        );
+        renderer.end_turn();
+
+        let details = renderer
+            .composer_details()
+            .expect("completed output should be inspectable");
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("demo-output"));
+        assert!(details.body.contains("exit 0"));
+        assert!(details.body.contains("output line 1"));
+        assert!(details.body.contains("output line 8"));
+    }
+
+    #[test]
+    fn short_file_read_content_is_rendered_inline_without_an_inspector() {
+        let call = PendingCall {
+            name: "file_read".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "content": "fn main() {\n    println!(\"hi\");\n}",
+                    "totalLines": 3
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("└ output"));
+        assert!(receipt.contains("fn main()"));
+        assert!(receipt.contains("println!"));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn short_search_results_render_as_readable_inline_rows() {
+        let call = PendingCall {
+            name: "grep".into(),
+            args: serde_json::json!({"pattern": "alpha"}),
+            output: Some(
+                serde_json::json!({
+                    "count": 2,
+                    "matches": [
+                        {"file": "src/a.rs", "line": 4, "content": "let alpha = 1;"},
+                        {"file": "src/b.rs", "line": 9, "content": "use alpha;"}
+                    ]
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("2 matches"));
+        assert!(receipt.contains("src/a.rs:4  let alpha = 1;"));
+        assert!(receipt.contains("src/b.rs:9  use alpha;"));
+        assert!(!receipt.contains("\"matches\""));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn failed_tool_output_keeps_the_useful_tail_beside_the_receipt() {
+        let output = (1..=20)
+            .map(|line| format!("failure line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "failing-check"}),
+            output: Some(
+                serde_json::json!({
+                    "output": output,
+                    "exitCode": 1
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("hidden failure output is inspectable");
+
+        assert!(receipt.contains("14 earlier lines hidden · Ctrl+O details"));
+        assert!(receipt.contains("└ output"));
+        assert!(!receipt.contains("failure line 14"));
+        assert!(receipt.contains("failure line 15"));
+        assert!(receipt.contains("failure line 20"));
+        assert!(!details.expanded_by_default);
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("8 earlier lines hidden"));
+        assert!(!details.body.contains("failure line 1\n"));
+        assert!(details.body.contains("failure line 9"));
+        assert!(details.body.contains("failure line 20"));
+    }
+
+    #[test]
+    fn long_successful_output_stays_folded_for_the_last_turn_inspector() {
+        let output = (1..=8)
+            .map(|line| format!("output line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "long-output"}),
+            output: Some(
+                serde_json::json!({
+                    "output": output,
+                    "exitCode": 0
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("long output should be inspectable");
+
+        assert!(receipt.contains("8 lines hidden · Ctrl+O details"));
+        assert!(!receipt.contains("output line 1"));
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("output line 1"));
+        assert!(details.body.contains("output line 8"));
+    }
+
+    #[test]
+    fn short_test_output_is_inline_without_exposing_result_json() {
+        let call = PendingCall {
+            name: "run_tests".into(),
+            args: serde_json::json!({"mode": "all"}),
+            output: Some(
+                serde_json::json!({
+                    "framework": "cargo",
+                    "total": 2,
+                    "passed": 2,
+                    "failed": 0,
+                    "exitCode": 0,
+                    "failures": [],
+                    "outputExcerpt": "test alpha ... ok\ntest beta ... ok"
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("test alpha ... ok"));
+        assert!(receipt.contains("test beta ... ok"));
+        assert!(!receipt.contains("outputExcerpt"));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn file_edit_diff_is_available_behind_the_compact_hunk_receipt() {
+        let diff = "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new";
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "verified": true,
+                    "diff": diff
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("diff should be inspectable");
+
+        assert!(receipt.contains("1 hunk · 5 lines hidden · Ctrl+O details"));
+        assert!(details.body.contains("-old"));
+        assert!(details.body.contains("+new"));
+        assert!(!details.body.contains("\"diff\""));
     }
 
     #[test]

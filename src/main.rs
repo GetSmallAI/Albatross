@@ -1042,6 +1042,7 @@ async fn main() -> anyhow::Result<()> {
             input_history.entries().to_vec(),
             command_names.clone(),
             composer_footer,
+            state.renderer.composer_details().cloned(),
         )
         .await?
         {

@@ -118,7 +118,7 @@ pub fn render_session_header_for(
     width: usize,
 ) -> String {
     let (project, branch, dirty) = workspace_context(&config.workspace_root);
-    render_session_header(
+    let mut rendered = render_session_header(
         SessionHeaderInfo {
             project: &project,
             branch: branch.as_deref(),
@@ -129,7 +129,9 @@ pub fn render_session_header_for(
             approval: config.approval_policy.as_str(),
         },
         width,
-    )
+    );
+    rendered.push('\n');
+    rendered
 }
 
 pub fn compact_session_context_for(config: &crate::config::AgentConfig, model: &str) -> String {
@@ -268,6 +270,10 @@ mod tests {
         assert_eq!(
             lines[2],
             "  grok · grok-build-0.1 · edit · ask for risky actions"
+        );
+        assert!(
+            rendered.ends_with('\n'),
+            "the session header should leave a breathing row before the first prompt"
         );
     }
 

@@ -45,6 +45,11 @@ few that aren't usual:
   into the transcript. Approval previews use workspace-relative paths, omit
   diff headers and hunk coordinates, and cap long changes before they crowd the
   picker. Full arguments and output remain available in verbose mode.
+- **Tool evidence where it belongs.** Short shell output, file content, search
+  matches, test logs, and useful failure tails render directly beneath their
+  receipt. Only long evidence and diffs fold behind `Ctrl+O`; the composer owns
+  that temporary “last turn details” inspector, so toggling never moves or
+  clears the draft.
 - **Calm failure states.** Warnings and errors lead with a readable summary,
   then put the recovery action on its own indented row. Cancelling a turn emits
   one warning, leaves conversation state unchanged, and returns to the composer.

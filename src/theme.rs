@@ -107,6 +107,7 @@ pub const SUB: Sym = Sym("↳", ">");
 pub const WARN_MARK: Sym = Sym("▲", "!");
 pub const BULLET: Sym = Sym("•", "*");
 pub const PROMPT_CHAR: Sym = Sym("❯", ">");
+pub const BRANCH_MID: Sym = Sym("├", "+");
 pub const BRANCH_END: Sym = Sym("└", "`");
 pub const BOLT: Sym = Sym("⚡", "*");
 pub const BANG: Sym = Sym("!", "!");
