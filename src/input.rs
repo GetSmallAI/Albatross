@@ -536,6 +536,24 @@ fn completion_matches<'a>(
     matches
 }
 
+/// Text to submit when the user presses Enter. An open completion menu is an
+/// explicit selection surface: submit its highlighted command rather than the
+/// incomplete prefix still present in the editor.
+fn submitted_text(
+    chars: &[char],
+    cursor: usize,
+    selected: usize,
+    commands: &[(String, String)],
+    dismissed: bool,
+) -> String {
+    let typed: String = chars.iter().collect();
+    let matches = completion_matches(&typed, cursor, chars.len(), commands, dismissed);
+    matches
+        .get(selected.min(matches.len().saturating_sub(1)))
+        .map(|(name, _)| (*name).clone())
+        .unwrap_or(typed)
+}
+
 /// Build the full redraw string for the input line plus (optionally) the
 /// completion menu, leaving the cursor parked at the logical edit position.
 ///
@@ -813,10 +831,12 @@ fn read_line_outcome(
                         }
                     }
                     KeyCode::Enter => {
+                        let submitted = submitted_text(&chars, cursor, sel, commands, dismissed);
+                        let submitted_chars: Vec<char> = submitted.chars().collect();
                         let final_frame = surface.finish(
                             EditorView {
-                                chars: &chars,
-                                cursor,
+                                chars: &submitted_chars,
+                                cursor: submitted_chars.len(),
                                 selected: sel,
                                 dismissed,
                                 term_cols,
@@ -826,7 +846,7 @@ fn read_line_outcome(
                         );
                         write!(out, "{final_frame}")?;
                         out.flush()?;
-                        return Ok(ReadLineOutcome::Line(chars.iter().collect()));
+                        return Ok(ReadLineOutcome::Line(submitted));
                     }
                     KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
                         chars.insert(cursor, '\n');
@@ -1448,6 +1468,28 @@ mod tests {
         assert!(completion_matches("/help", 5, 5, &c, false).is_empty());
         // no matches
         assert!(completion_matches("/zzz", 4, 4, &c, false).is_empty());
+    }
+
+    #[test]
+    fn enter_submits_the_highlighted_command_completion() {
+        let commands = vec![
+            ("/clear".into(), "clear the screen".into()),
+            ("/close".into(), "close the session".into()),
+        ];
+        let typed: Vec<char> = "/cl".chars().collect();
+
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 0, &commands, false),
+            "/clear"
+        );
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 1, &commands, false),
+            "/close"
+        );
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 0, &commands, true),
+            "/cl"
+        );
     }
 
     #[test]
