@@ -211,11 +211,15 @@ fn format_compact_cost_suffix(
     format_cost_suffix(turn_cost, backend_is_local, session_usd, has_unknown)
 }
 
-fn format_compact_timing(metrics: &TurnMetrics) -> String {
+fn format_compact_timing(metrics: &TurnMetrics, visible_actions: usize) -> String {
     let mut parts = Vec::new();
-    if metrics.steps > 0 {
-        let noun = if metrics.steps == 1 { "step" } else { "steps" };
-        parts.push(format!("{} {noun}", metrics.steps));
+    if visible_actions > 0 {
+        let noun = if visible_actions == 1 {
+            "action"
+        } else {
+            "actions"
+        };
+        parts.push(format!("{visible_actions} {noun}"));
     }
     if metrics.total_ms > 0 {
         parts.push(format!("{:.1}s", metrics.total_ms as f64 / 1000.0));
@@ -239,6 +243,7 @@ struct TurnFooter<'a> {
     session_cost_has_unknown: bool,
     effort: Option<EffortLevel>,
     metrics: &'a TurnMetrics,
+    visible_actions: usize,
     path_suffix: &'a str,
     fable_suffix: &'a str,
     model: &'a str,
@@ -264,7 +269,7 @@ fn format_footer_at_width(input: &TurnFooter<'_>, width: usize) -> String {
             format_tokens(input.cached_input_tokens)
         ));
     }
-    let timing = format_compact_timing(input.metrics);
+    let timing = format_compact_timing(input.metrics, input.visible_actions);
     if !timing.is_empty() {
         primary.push(timing);
     }
@@ -1204,6 +1209,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             session_cost_has_unknown: state.session_cost_has_unknown,
             effort: state.active_effort,
             metrics: &metrics,
+            visible_actions: tool_calls.len(),
             path_suffix: &path_suffix,
             fable_suffix: &fable_suffix,
             model: &state.model,
@@ -1234,6 +1240,7 @@ mod cost_tests {
         session_cost_has_unknown: bool,
         effort: Option<EffortLevel>,
         metrics: &TurnMetrics,
+        visible_actions: usize,
         path_suffix: &str,
         _scorecard_suffix: &str,
         fable_suffix: &str,
@@ -1249,6 +1256,7 @@ mod cost_tests {
             session_cost_has_unknown,
             effort,
             metrics,
+            visible_actions,
             path_suffix,
             fable_suffix,
             model,
@@ -1266,6 +1274,7 @@ mod cost_tests {
         session_cost_has_unknown: bool,
         effort: Option<EffortLevel>,
         metrics: &TurnMetrics,
+        visible_actions: usize,
         path_suffix: &str,
         _scorecard_suffix: &str,
         fable_suffix: &str,
@@ -1283,6 +1292,7 @@ mod cost_tests {
                 session_cost_has_unknown,
                 effort,
                 metrics,
+                visible_actions,
                 path_suffix,
                 fable_suffix,
                 model,
@@ -1547,7 +1557,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = test_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1579,12 +1589,13 @@ mod cost_tests {
             false,
             Some(EffortLevel::High),
             &metrics,
+            2,
             "path: main · 2 paths",
             "3 turn(s) tracked · /ship pr closes scorecard",
             "Fable 25.0k / 50.0k wk (50%)",
             "grok-4.5",
         );
-        assert!(footer.contains("500 in · 120 out · 2 steps · 1.0s · grok-4.5"));
+        assert!(footer.contains("500 in · 120 out · 2 actions · 1.0s · grok-4.5"));
         assert!(footer.contains("$0.01 this turn · $0.01 session"));
         assert!(footer.contains("effort high"));
         assert!(footer.contains("path: main · 2 paths"));
@@ -1615,6 +1626,7 @@ mod cost_tests {
             true,
             None,
             &metrics,
+            2,
             "",
             "6 turn(s) tracked · /ship pr closes scorecard",
             "",
@@ -1622,12 +1634,34 @@ mod cost_tests {
         );
 
         assert!(footer.contains("2.7k in · 15 out · 2.6k cached"));
-        assert!(footer.contains("2 steps · 1.5s"));
+        assert!(footer.contains("2 actions · 1.5s"));
         assert!(!footer.contains("TTFT"));
         assert!(!footer.contains("model 1.3s"));
         assert!(!footer.contains("/ship"));
         assert!(!footer.contains("scorecard"));
         assert!(!footer.contains("turn(s) tracked"));
+    }
+
+    #[test]
+    fn compact_timing_reports_visible_actions_without_exposing_model_steps() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+
+        assert_eq!(format_compact_timing(&metrics, 1), "1 action · 2.5s");
+    }
+
+    #[test]
+    fn compact_timing_omits_model_steps_without_visible_actions() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+
+        assert_eq!(format_compact_timing(&metrics, 0), "2.5s");
     }
 
     #[test]
@@ -1648,6 +1682,7 @@ mod cost_tests {
             false,
             Some(EffortLevel::High),
             &metrics,
+            2,
             "path: main · 2 paths",
             "",
             "Fable 25.0k / 50.0k wk (50%)",
@@ -1656,7 +1691,7 @@ mod cost_tests {
         let rows = footer.lines().collect::<Vec<_>>();
 
         assert!(rows.len() >= 2, "primary receipt + secondary context");
-        assert!(rows[0].contains("500 in · 120 out · 2 steps · 1.5s · grok-4.5"));
+        assert!(rows[0].contains("500 in · 120 out · 2 actions · 1.5s · grok-4.5"));
         assert!(!rows[0].contains('$'));
         let secondary = rows[1..].join("\n");
         assert!(secondary.contains("$0.01 this turn · $0.04 session"));
@@ -1677,6 +1712,7 @@ mod cost_tests {
             true,
             None,
             &TurnMetrics::default(),
+            0,
             "",
             "",
             "",
@@ -1705,6 +1741,7 @@ mod cost_tests {
             false,
             None,
             &metrics,
+            3,
             "",
             "",
             "",
@@ -1722,7 +1759,7 @@ mod cost_tests {
         assert!(footer.contains("12.7k in"));
         assert!(footer.contains("845 out"));
         assert!(footer.contains("11.9k cached"));
-        assert!(footer.contains("3 steps"));
+        assert!(footer.contains("3 actions"));
         assert!(footer.contains("2.5s"));
     }
 
@@ -1738,6 +1775,7 @@ mod cost_tests {
             false,
             None,
             &TurnMetrics::default(),
+            0,
             "",
             "",
             "",
@@ -1758,7 +1796,7 @@ mod cost_tests {
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = test_footer(
-            100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
+            100, 50, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1778,6 +1816,7 @@ mod cost_tests {
             false,
             None,
             &metrics,
+            0,
             "",
             "",
             "",
@@ -1793,12 +1832,12 @@ mod cost_tests {
         let metrics = TurnMetrics::default();
         // Provider reported a cache hit: surface it between out and cost.
         let hit = test_footer(
-            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 900, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         assert!(hit.contains("1.2k in · 87 out · 900 cached"));
         // No cache hit reported: no "cached" part at all.
         let miss = test_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         assert!(!miss.contains("cached"));
     }
