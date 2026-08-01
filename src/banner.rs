@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::theme::{MUTED, PAD, RESET, TEXT};
+use crate::theme::{ACCENT, BOLD, MUTED, PAD, RESET, TEXT};
 
 struct SessionHeaderInfo<'a> {
     project: &'a str,
@@ -28,45 +28,9 @@ fn truncate_to_width(value: &str, max: usize) -> String {
     truncated
 }
 
-/// Lay metadata out as compact `label: value` pairs, starting a new row when
-/// another pair would overflow. Session context remains recognizably distinct
-/// from transcript roles such as `user` and `response`.
-fn metadata_rows(fields: &[(&str, String)], width: usize) -> Vec<String> {
-    let mut rows: Vec<Vec<(String, String)>> = Vec::new();
-    let mut row_width = 0;
-
-    for (label, value) in fields {
-        let mut value = value.clone();
-        let label_width = label.chars().count() + 2; // `: `
-        let available = width.saturating_sub(label_width).max(1);
-        value = truncate_to_width(&value, available);
-        let field_width = label_width + value.chars().count();
-        let separator_width = usize::from(row_width > 0) * 3; // ` · `
-
-        if row_width > 0 && row_width + separator_width + field_width > width {
-            rows.push(Vec::new());
-            row_width = 0;
-        }
-
-        if rows.is_empty() {
-            rows.push(Vec::new());
-        }
-        rows.last_mut()
-            .expect("metadata row was initialized")
-            .push(((*label).to_string(), value));
-        row_width += usize::from(row_width > 0) * 3 + field_width;
-    }
-
-    rows.into_iter()
-        .map(|row| {
-            let fields = row
-                .into_iter()
-                .map(|(label, value)| format!("{MUTED}{label}:{RESET} {TEXT}{value}{RESET}"))
-                .collect::<Vec<_>>()
-                .join(&format!("{MUTED} · {RESET}"));
-            format!("{PAD}{fields}")
-        })
-        .collect()
+fn panel_row(content: &str, inner_width: usize) -> String {
+    let content = truncate_to_width(content, inner_width);
+    format!("{PAD}{MUTED}│{RESET} {TEXT}{content:<inner_width$}{RESET} {MUTED}│{RESET}")
 }
 
 fn render_session_header(info: SessionHeaderInfo<'_>, width: usize) -> String {
@@ -76,28 +40,40 @@ fn render_session_header(info: SessionHeaderInfo<'_>, width: usize) -> String {
         "never" => "no approval prompts",
         other => other,
     };
-    let content_width = width.clamp(20, 400).saturating_sub(2);
-    let inner_width = content_width.saturating_sub(PAD.chars().count());
-    let workspace = vec![
-        ("session", "albatross".to_string()),
-        ("project", info.project.to_string()),
-        ("branch", info.branch.unwrap_or("detached").to_string()),
-        (
-            "status",
-            if info.dirty { "modified" } else { "clean" }.to_string(),
-        ),
+    let panel_width = width.clamp(32, 78);
+    let inner_width = panel_width.saturating_sub(PAD.len() + 6);
+    let title = "Albatross";
+    let top_fill = "─".repeat(inner_width.saturating_sub(title.len()));
+    let bottom_fill = "─".repeat(inner_width + 2);
+    let branch = info.branch.unwrap_or("detached");
+    let status = if info.dirty { "modified" } else { "clean" };
+    let commands = [
+        format!("{PAD}{MUTED}/help{RESET}    {TEXT}list commands{RESET}"),
+        format!("{PAD}{MUTED}/models{RESET}  {TEXT}change model{RESET}"),
+        format!("{PAD}{MUTED}/status{RESET}  {TEXT}inspect this session{RESET}"),
     ];
-    let runtime = vec![
-        ("backend", info.backend.to_string()),
-        ("model", info.model.to_string()),
-        ("mode", info.mode.to_string()),
-        ("approval", approval.to_string()),
-    ];
+
     [
-        metadata_rows(&workspace, inner_width),
-        metadata_rows(&runtime, inner_width),
+        format!("{PAD}{MUTED}╭─ {ACCENT}{BOLD}{title}{RESET}{MUTED} {top_fill}{RESET}"),
+        panel_row("A terminal coding agent.", inner_width),
+        panel_row("", inner_width),
+        panel_row(
+            &format!("model: {} · backend: {}", info.model, info.backend),
+            inner_width,
+        ),
+        panel_row(
+            &format!("project: {} · branch: {}", info.project, branch),
+            inner_width,
+        ),
+        panel_row(
+            &format!("mode: {} · approval: {} · {}", info.mode, approval, status),
+            inner_width,
+        ),
+        format!("{PAD}{MUTED}╰{bottom_fill}╯{RESET}"),
+        String::new(),
+        format!("{PAD}{MUTED}Describe a task or try a command:{RESET}"),
+        commands.join("\n"),
     ]
-    .concat()
     .join("\n")
 }
 
@@ -225,16 +201,16 @@ mod tests {
         ));
         let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert_eq!(lines.len(), 2);
-        assert_eq!(
-            lines[0],
-            "  session: albatross · project: Albatross · branch: main · status: modified"
-        );
-        assert_eq!(
-            lines[1],
-            "  backend: grok · model: grok-build-0.1 · mode: edit · approval: ask for risky actions"
-        );
-        assert!(!rendered.contains('─'));
+        assert_eq!(lines.len(), 12);
+        assert!(lines[0].starts_with("  ╭─ Albatross "));
+        assert!(rendered.contains("A terminal coding agent."));
+        assert!(rendered.contains("model: grok-build-0.1 · backend: grok"));
+        assert!(rendered.contains("project: Albatross · branch: main"));
+        assert!(rendered.contains("mode: edit · approval: ask for risky actions · modified"));
+        assert!(rendered.contains("Describe a task or try a command:"));
+        assert!(rendered.contains("/help    list commands"));
+        assert!(rendered.contains("/models  change model"));
+        assert!(rendered.contains("/status  inspect this session"));
     }
 
     #[test]
@@ -253,20 +229,18 @@ mod tests {
         ));
         let lines = rendered.lines().collect::<Vec<_>>();
 
-        assert!(lines.len() >= 4, "metadata should reflow: {rendered:?}");
+        assert_eq!(lines.len(), 12, "startup should stay compact: {rendered:?}");
         for field in [
-            "session: albatross",
-            "project: Albatross",
-            "branch: feature/polished-ui",
-            "status: clean",
-            "backend: openai-codex",
+            "Albatross",
+            "A terminal coding agent.",
             "model: gpt-5.2-codex",
+            "project: Albatross",
             "mode: review",
-            "approval: ask for risky actions",
+            "Describe a task or try a command:",
+            "/help    list commands",
         ] {
             assert!(rendered.contains(field), "missing {field:?}: {rendered:?}");
         }
-        assert!(!rendered.contains('─'));
         assert!(lines.iter().all(|line| line.chars().count() <= 40));
     }
 
@@ -306,14 +280,9 @@ mod tests {
 
         let rendered = plain(&render_session_header_for(&config, "grok-build-0.1", 120));
         let lines = rendered.lines().collect::<Vec<_>>();
-        assert_eq!(
-            lines[0],
-            "  session: albatross · project: Albatross · branch: main · status: modified"
-        );
-        assert_eq!(
-            lines[1],
-            "  backend: grok · model: grok-build-0.1 · mode: edit · approval: ask for risky actions"
-        );
+        assert!(lines[0].starts_with("  ╭─ Albatross "));
+        assert!(rendered.contains("model: grok-build-0.1 · backend: grok"));
+        assert!(rendered.contains("Describe a task or try a command:"));
         assert!(
             rendered.ends_with('\n'),
             "the session header should leave a breathing row before the first prompt"
