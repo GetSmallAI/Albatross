@@ -93,6 +93,7 @@ async fn read_and_explain_mock_loop() {
     let tools = build_tools_for_names(&config, &config.tools, None);
     let http = build_http_client();
     let mut tool_calls = Vec::new();
+    let mut lifecycle = Vec::new();
 
     let run = run_agent(
         &http,
@@ -102,10 +103,21 @@ async fn read_and_explain_mock_loop() {
         messages,
         tools,
         6,
-        |event| {
-            if let AgentEvent::ToolCall { name, .. } = event {
+        |event| match event {
+            AgentEvent::ToolCall { name, call_id, .. } => {
                 tool_calls.push(name);
+                lifecycle.push(format!("announced:{call_id}"));
             }
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"));
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"));
+            }
+            AgentEvent::ToolResult { call_id, .. } => {
+                lifecycle.push(format!("receipt:{call_id}"));
+            }
+            _ => {}
         },
         None,
         None,
@@ -136,6 +148,15 @@ async fn read_and_explain_mock_loop() {
     };
     let checks = evaluate_checks(&fixture_workspace(), &fixture.checks, &run, &tool_calls);
     assert!(checks.iter().all(|c| c.passed), "{checks:?}");
+    assert_eq!(
+        lifecycle,
+        [
+            "announced:call_1",
+            "running:call_1",
+            "execution-finished:call_1",
+            "receipt:call_1"
+        ]
+    );
     assert!(!run.hit_step_limit);
 }
 
@@ -175,9 +196,17 @@ async fn denied_tools_never_emit_running_activity() {
         tools,
         6,
         |event| match event {
-            AgentEvent::ToolCall { .. } => lifecycle.push("announced"),
-            AgentEvent::ToolExecutionStarted { .. } => lifecycle.push("running"),
-            AgentEvent::ToolResult { .. } => lifecycle.push("finished"),
+            AgentEvent::ToolCall { call_id, .. } => lifecycle.push(format!("announced:{call_id}")),
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"))
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"))
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, .. } => {
+                lifecycle.push(format!("execution-skipped:{call_id}"))
+            }
+            AgentEvent::ToolResult { call_id, .. } => lifecycle.push(format!("receipt:{call_id}")),
             _ => {}
         },
         Some(&mut approval),
@@ -192,7 +221,14 @@ async fn denied_tools_never_emit_running_activity() {
     .unwrap();
 
     server.join().unwrap();
-    assert_eq!(lifecycle, ["announced", "finished"]);
+    assert_eq!(
+        lifecycle,
+        [
+            "announced:call_1",
+            "execution-skipped:call_1",
+            "receipt:call_1"
+        ]
+    );
     assert!(!fixture_workspace().join("denied.txt").exists());
 }
 

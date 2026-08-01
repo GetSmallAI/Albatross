@@ -49,6 +49,20 @@ pub enum AgentEvent {
     /// running while the user is still deciding whether to allow it.
     ToolExecutionStarted {
         name: String,
+        call_id: String,
+        depth: u32,
+    },
+    /// Execution has stopped, but the final tool receipt may still be waiting
+    /// on output compaction and post-tool hooks.
+    ToolExecutionFinished {
+        call_id: String,
+        depth: u32,
+    },
+    /// The call will produce a tool result without running (for example after
+    /// denial, a hook block, or an unknown tool name).
+    ToolExecutionSkipped {
+        call_id: String,
+        depth: u32,
     },
     ToolResult {
         name: String,
@@ -786,7 +800,13 @@ where
 
         for (i, entry) in pending.into_iter().enumerate() {
             match entry {
-                Pending::Done(out) => outputs[i] = Some(out),
+                Pending::Done(out) => {
+                    outputs[i] = Some(out);
+                    on_event(AgentEvent::ToolExecutionSkipped {
+                        call_id: tcs[i].id.clone(),
+                        depth,
+                    });
+                }
                 Pending::Run {
                     tool,
                     args,
@@ -794,6 +814,8 @@ where
                 } => {
                     on_event(AgentEvent::ToolExecutionStarted {
                         name: tcs[i].function.name.clone(),
+                        call_id: tcs[i].id.clone(),
+                        depth,
                     });
                     let c = cancel.clone();
                     read_idx.push(i);
@@ -817,12 +839,18 @@ where
                 outputs[i] = Some(out);
                 tool_durations[i] = ms;
                 metrics.tool_ms += ms;
+                on_event(AgentEvent::ToolExecutionFinished {
+                    call_id: tcs[i].id.clone(),
+                    depth,
+                });
             }
         }
 
         for (i, tool, args) in serial {
             on_event(AgentEvent::ToolExecutionStarted {
                 name: tcs[i].function.name.clone(),
+                call_id: tcs[i].id.clone(),
+                depth,
             });
             let start = Instant::now();
             outputs[i] = Some(value_to_string(
@@ -831,6 +859,10 @@ where
             let ms = start.elapsed().as_millis() as u64;
             tool_durations[i] = ms;
             metrics.tool_ms += ms;
+            on_event(AgentEvent::ToolExecutionFinished {
+                call_id: tcs[i].id.clone(),
+                depth,
+            });
         }
 
         for (((((tc, output), duration_ms), tool_input), original_tool_input), run_post_hook) in tcs

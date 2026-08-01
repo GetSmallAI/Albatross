@@ -788,6 +788,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 
     let mut memory_changed = false;
     let loader_style = state.config.display.loader_style;
+    let renderer_manages_tool_activity = state.renderer.manages_tool_activity();
     let drain_fut = async {
         while let Some(e) = rx.recv().await {
             if let Some(l) = loader_opt.take() {
@@ -798,7 +799,11 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                     tool_calls.push(name.clone());
                     None
                 }
-                AgentEvent::ToolExecutionStarted { name, .. } => Some(format!("Running {name}…")),
+                AgentEvent::ToolExecutionStarted { name, .. }
+                    if !renderer_manages_tool_activity =>
+                {
+                    Some(format!("Running {name}…"))
+                }
                 _ => None,
             };
             if let AgentEvent::ToolResult { name, output, .. } = &e {

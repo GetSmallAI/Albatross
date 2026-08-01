@@ -344,9 +344,214 @@ impl StreamWrap {
 
 struct PendingCall {
     name: String,
-    call_id: String,
     args: Value,
     output: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolLifecycleState {
+    Queued,
+    Running,
+    Finished,
+    Skipped,
+}
+
+struct ToolLifecycleCall {
+    name: String,
+    call_id: String,
+    args: Value,
+    state: ToolLifecycleState,
+}
+
+struct ActivityFrame {
+    text: String,
+    rows: usize,
+}
+
+/// Owns the terminal rows used by the transient tool display. Replacing or
+/// clearing the region never moves above those rows, so immutable transcript
+/// output cannot be erased by a later lifecycle update.
+#[derive(Default)]
+struct ActiveRegion {
+    rows: usize,
+}
+
+impl ActiveRegion {
+    fn replace(&mut self, frame: ActivityFrame) -> String {
+        let mut output = self.clear();
+        output.push_str(&frame.text);
+        self.rows = frame.rows;
+        output
+    }
+
+    fn clear(&mut self) -> String {
+        if self.rows == 0 {
+            return String::new();
+        }
+        let up = self.rows.saturating_sub(1);
+        self.rows = 0;
+        if up == 0 {
+            "\r\x1b[0J".to_string()
+        } else {
+            format!("\x1b[{up}A\r\x1b[0J")
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolLifecycle {
+    calls: Vec<ToolLifecycleCall>,
+}
+
+impl ToolLifecycle {
+    fn announce(&mut self, name: &str, call_id: &str, args: Value) {
+        self.calls.push(ToolLifecycleCall {
+            name: name.to_string(),
+            call_id: call_id.to_string(),
+            args,
+            state: ToolLifecycleState::Queued,
+        });
+    }
+
+    fn execution_started(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Running;
+        }
+    }
+
+    fn execution_finished(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Finished;
+        }
+    }
+
+    fn execution_skipped(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Skipped;
+        }
+    }
+
+    fn take_result(&mut self, call_id: &str) -> Option<PendingCall> {
+        let index = self.calls.iter().position(|call| call.call_id == call_id)?;
+        let call = self.calls.remove(index);
+        Some(PendingCall {
+            name: call.name,
+            args: call.args,
+            output: None,
+        })
+    }
+
+    fn drain(&mut self) -> Vec<PendingCall> {
+        self.calls
+            .drain(..)
+            .map(|call| PendingCall {
+                name: call.name,
+                args: call.args,
+                output: None,
+            })
+            .collect()
+    }
+
+    fn frame(&self) -> ActivityFrame {
+        self.frame_at_width(crate::theme::cols())
+    }
+
+    fn frame_at_width(&self, width: usize) -> ActivityFrame {
+        if self.calls.is_empty() {
+            return ActivityFrame {
+                text: String::new(),
+                rows: 0,
+            };
+        }
+
+        let mut text = String::from("\r\n");
+        for (index, call) in self.calls.iter().enumerate() {
+            text.push('\r');
+            text.push_str(&truncate_ansi_visible(&format_activity_row(call), width));
+            if index + 1 < self.calls.len() {
+                text.push_str("\r\n");
+            }
+        }
+        ActivityFrame {
+            text,
+            rows: self.calls.len() + 1,
+        }
+    }
+}
+
+fn truncate_ansi_visible(value: &str, max: usize) -> String {
+    if crate::theme::visible_len(value) <= max {
+        return value.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+
+    let target = max.saturating_sub(1);
+    let mut output = String::new();
+    let mut visible = 0usize;
+    let mut in_escape = false;
+    for character in value.chars() {
+        if in_escape {
+            output.push(character);
+            if character == 'm' {
+                in_escape = false;
+            }
+        } else if character == '\x1b' {
+            in_escape = true;
+            output.push(character);
+        } else if visible < target {
+            output.push(character);
+            visible += 1;
+        } else {
+            break;
+        }
+    }
+    output.push('…');
+    output.push_str(&RESET.to_string());
+    output
+}
+
+fn label_active(name: &str) -> &'static str {
+    match name {
+        "shell" => "Running",
+        "file_read" => "Reading",
+        "file_write" => "Writing",
+        "file_edit" => "Editing",
+        "glob" => "Exploring",
+        "grep" => "Searching",
+        "list_dir" => "Listing",
+        "task" => "Delegating",
+        _ => "Using",
+    }
+}
+
+fn format_activity_row(call: &ToolLifecycleCall) -> String {
+    let detail = formatter_for(&call.name, &call.args);
+    match call.state {
+        ToolLifecycleState::Queued => {
+            let separator = if detail.is_empty() { "" } else { " · " };
+            format!(
+                "{PAD}{GRAY}{PENDING}{RESET} {DIM}Queued{RESET}  {GRAY}{}{separator}{detail}{RESET}",
+                call.name
+            )
+        }
+        ToolLifecycleState::Running => format!(
+            "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{}{RESET}  {TEXT}{detail}{RESET}",
+            label_active(&call.name)
+        ),
+        ToolLifecycleState::Finished => format!(
+            "{PAD}{GREEN}{OK}{RESET} {DIM}{}{RESET}  {GRAY}{detail}{RESET}",
+            label_past(&call.name)
+        ),
+        ToolLifecycleState::Skipped => {
+            let separator = if detail.is_empty() { "" } else { " · " };
+            format!(
+                "{PAD}{RED}{FAIL}{RESET} {DIM}Skipped{RESET}  {GRAY}{}{separator}{detail}{RESET}",
+                call.name
+            )
+        }
+    }
 }
 
 /// Format one completed tool as a self-contained transcript receipt.
@@ -381,7 +586,8 @@ pub struct TuiRenderer {
     display: DisplayConfig,
     tool_start: HashMap<String, Instant>,
     streaming: bool,
-    grouped_pending: Vec<PendingCall>,
+    tool_lifecycle: ToolLifecycle,
+    active_region: ActiveRegion,
     minimal_batch: BTreeMap<String, usize>,
     /// Per-turn flag: have we already printed the "thinking…" header for the
     /// current burst of reasoning deltas? Reset at end_turn so each turn
@@ -433,7 +639,8 @@ impl TuiRenderer {
             display,
             tool_start: HashMap::new(),
             streaming: false,
-            grouped_pending: Vec::new(),
+            tool_lifecycle: ToolLifecycle::default(),
+            active_region: ActiveRegion::default(),
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
             answer_wrap: None,
@@ -476,6 +683,13 @@ impl TuiRenderer {
         self.trace_enabled
     }
 
+    /// Whether this renderer owns the transient tool rows. Other display
+    /// styles keep the legacy single-line loader until they adopt lifecycle
+    /// receipts of their own.
+    pub fn manages_tool_activity(&self) -> bool {
+        matches!(self.display.tool_display, ToolDisplay::Grouped)
+    }
+
     pub fn handle(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Text { delta } => self.render_text(&delta),
@@ -488,7 +702,17 @@ impl TuiRenderer {
                 self.end_answer();
                 self.render_tool_call(&name, &call_id, args, depth)
             }
-            AgentEvent::ToolExecutionStarted { .. } => {}
+            AgentEvent::ToolExecutionStarted {
+                name: _,
+                call_id,
+                depth,
+            } => self.render_tool_execution_started(&call_id, depth),
+            AgentEvent::ToolExecutionFinished { call_id, depth } => {
+                self.render_tool_execution_finished(&call_id, depth)
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, depth } => {
+                self.render_tool_execution_skipped(&call_id, depth)
+            }
             AgentEvent::ToolResult {
                 name,
                 call_id,
@@ -509,7 +733,9 @@ impl TuiRenderer {
             }
             AgentEvent::ContextCompacted { notice, .. } => {
                 self.end_answer();
+                self.clear_active_region();
                 println!("{notice}");
+                self.redraw_active_region();
             }
             AgentEvent::HookNotice(notice) => {
                 self.end_answer();
@@ -658,12 +884,7 @@ impl TuiRenderer {
                 println!("  {color}{BOLT}{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
             }
             ToolDisplay::Grouped => {
-                self.grouped_pending.push(PendingCall {
-                    name: name.to_string(),
-                    call_id: call_id.to_string(),
-                    args,
-                    output: None,
-                });
+                self.tool_lifecycle.announce(name, call_id, args);
             }
             ToolDisplay::Minimal => {
                 *self.minimal_batch.entry(name.to_string()).or_insert(0) += 1;
@@ -769,15 +990,12 @@ impl TuiRenderer {
                 println!("  {GREEN}{OK}{RESET} {DIM}{name} {dur}{RESET}");
             }
             ToolDisplay::Grouped => {
-                if let Some(index) = self
-                    .grouped_pending
-                    .iter()
-                    .position(|pending| pending.call_id == call_id)
-                {
-                    let mut completed = self.grouped_pending.remove(index);
+                self.clear_active_region();
+                if let Some(mut completed) = self.tool_lifecycle.take_result(call_id) {
                     completed.output = Some(output.to_string());
                     self.write_grouped_receipt(&completed);
                 }
+                self.redraw_active_region();
             }
             ToolDisplay::Verbose => {
                 println!("{PAD}  {GRAY}←{RESET} {DIM}{dur}{RESET}");
@@ -798,7 +1016,9 @@ impl TuiRenderer {
         } else {
             String::new()
         };
+        self.clear_active_region();
         println!("{PAD}{indent}{DIM}{SUB} {name} output compacted: {summary}{RESET}");
+        self.redraw_active_region();
     }
 
     fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
@@ -811,23 +1031,70 @@ impl TuiRenderer {
             HookNoticeLevel::Stopped => (HOOK_STOP, "hook stopped", YELLOW),
             HookNoticeLevel::Feedback => (SUB, "hook", DIM),
         };
+        self.clear_active_region();
         println!(
             "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
             notice.event.as_str(),
             notice.message
         );
+        self.redraw_active_region();
     }
 
     fn flush_grouped(&mut self) {
-        if self.grouped_pending.is_empty() {
+        // The active region owns terminal rows independently of the registry.
+        // Always release those rows at the turn boundary, even if every call
+        // has already moved into the permanent transcript.
+        self.clear_active_region();
+        if self.tool_lifecycle.calls.is_empty() {
             return;
         }
         // Normally results remove and render calls one by one. If a turn ends
         // without a matching result, still surface each orphaned call rather
         // than silently dropping it or recombining it into a late batch.
-        for pending in std::mem::take(&mut self.grouped_pending) {
+        for pending in self.tool_lifecycle.drain() {
             self.write_grouped_receipt(&pending);
         }
+    }
+
+    fn render_tool_execution_started(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_started(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn render_tool_execution_finished(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_finished(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn render_tool_execution_skipped(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_skipped(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn redraw_active_region(&mut self) {
+        let update = self.active_region.replace(self.tool_lifecycle.frame());
+        if update.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{update}");
+        let _ = out.flush();
+    }
+
+    fn clear_active_region(&mut self) {
+        let clear = self.active_region.clear();
+        if clear.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{clear}");
+        let _ = out.flush();
     }
 
     fn write_grouped_receipt(&self, call: &PendingCall) {
@@ -1053,30 +1320,123 @@ mod verbose_tests {
     use crate::config::{DisplayConfig, ToolDisplay};
 
     #[test]
+    fn tool_lifecycle_frame_keeps_each_call_on_its_own_status_row() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce("list_dir", "list", serde_json::json!({"path": "."}));
+        lifecycle.announce("grep", "grep", serde_json::json!({"pattern": "test"}));
+        lifecycle.execution_started("list");
+
+        let frame = lifecycle.frame();
+
+        assert_eq!(frame.rows, 3, "leading gap plus one row per tool");
+        assert!(frame.text.contains("Listing"));
+        assert!(frame.text.contains("path=."));
+        assert!(frame.text.contains("Queued"));
+        assert!(frame.text.contains("grep"));
+        assert!(frame.text.contains("pattern=test"));
+    }
+
+    #[test]
+    fn tool_lifecycle_finishes_then_releases_one_call_for_its_receipt() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce("list_dir", "list", serde_json::json!({"path": "."}));
+        lifecycle.announce("grep", "grep", serde_json::json!({"pattern": "test"}));
+        lifecycle.execution_started("list");
+        lifecycle.execution_finished("list");
+
+        assert!(lifecycle.frame().text.contains("Listed"));
+        let completed = lifecycle.take_result("list").expect("known tool call");
+        let remaining = lifecycle.frame();
+
+        assert_eq!(completed.name, "list_dir");
+        assert_eq!(completed.args, serde_json::json!({"path": "."}));
+        assert_eq!(remaining.rows, 2, "leading gap plus the remaining tool");
+        assert!(!remaining.text.contains("Listed"));
+        assert!(remaining.text.contains("grep"));
+    }
+
+    #[test]
+    fn tool_lifecycle_marks_denied_calls_as_skipped_not_completed() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({"command": "rm denied.txt"}),
+        );
+
+        lifecycle.execution_skipped("shell");
+        let frame = lifecycle.frame();
+
+        assert!(frame.text.contains("Skipped"));
+        assert!(frame.text.contains("shell"));
+        assert!(!frame.text.contains("Ran"));
+    }
+
+    #[test]
+    fn active_region_repaint_clears_only_the_rows_owned_by_the_previous_frame() {
+        let mut region = ActiveRegion::default();
+        let first = region.replace(ActivityFrame {
+            text: "\r\n\rfirst\r\n\rsecond".into(),
+            rows: 3,
+        });
+        let second = region.replace(ActivityFrame {
+            text: "\r\n\rremaining".into(),
+            rows: 2,
+        });
+        let cleared = region.clear();
+
+        assert_eq!(first, "\r\n\rfirst\r\n\rsecond");
+        assert_eq!(second, "\x1b[2A\r\x1b[0J\r\n\rremaining");
+        assert_eq!(cleared, "\x1b[1A\r\x1b[0J");
+    }
+
+    #[test]
+    fn tool_lifecycle_frame_never_wraps_on_a_narrow_terminal() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({
+                "command": "find . -type f -name '*test*' -not -path './target/*'"
+            }),
+        );
+        lifecycle.execution_started("shell");
+
+        let frame = lifecycle.frame_at_width(36);
+
+        assert_eq!(frame.rows, 2);
+        for line in frame.text.split("\r\n").filter(|line| !line.is_empty()) {
+            let line = line.strip_prefix('\r').unwrap_or(line);
+            assert!(
+                crate::theme::visible_len(line) <= 36,
+                "active row wrapped past the tracked region: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn grouped_tools_leave_the_queue_as_each_result_arrives() {
         let mut r = TuiRenderer::new(DisplayConfig::default());
         for (name, call_id) in [("list_dir", "list"), ("shell", "shell"), ("grep", "grep")] {
             r.render_tool_call(name, call_id, serde_json::json!({"path": "."}), 0);
         }
 
-        assert_eq!(r.grouped_pending.len(), 3);
+        let before = r.tool_lifecycle.frame();
+        assert!(before.text.contains("list_dir"));
+        assert!(before.text.contains("shell"));
+        assert!(before.text.contains("grep"));
         r.render_tool_result("list_dir", "list", r#"{"count":22}"#, 0);
 
-        assert_eq!(
-            r.grouped_pending
-                .iter()
-                .map(|call| call.call_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["shell", "grep"],
-            "a completed tool must render and leave the queue immediately"
-        );
+        let after = r.tool_lifecycle.frame();
+        assert!(!after.text.contains("list_dir"));
+        assert!(after.text.contains("shell"));
+        assert!(after.text.contains("grep"));
     }
 
     #[test]
     fn grouped_receipts_anchor_every_physical_line_at_column_zero() {
         let call = PendingCall {
             name: "grep".into(),
-            call_id: "grep".into(),
             args: serde_json::json!({"pattern": "test"}),
             output: Some(r#"{"count":3,"matches":[]}"#.into()),
         };
