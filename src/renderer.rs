@@ -45,6 +45,17 @@ fn formatter_for(name: &str, args: &Value) -> String {
             let s = args.get("path").and_then(Value::as_str).unwrap_or("");
             format!("path={}", trunc(s, 50))
         }
+        "apply_patch" => {
+            let files = args
+                .get("patch")
+                .and_then(Value::as_str)
+                .map(crate::tools::patch_changed_files)
+                .unwrap_or_default();
+            match files.as_slice() {
+                [path] => trunc(path, 50),
+                _ => format!("{} files", files.len()),
+            }
+        }
         "glob" | "grep" => {
             let s = args.get("pattern").and_then(Value::as_str).unwrap_or("");
             format!("pattern={}", trunc(s, 50))
@@ -80,6 +91,7 @@ fn label_past(name: &str) -> &'static str {
         "file_read" => "Read",
         "file_write" => "Wrote",
         "file_edit" => "Edited",
+        "apply_patch" => "Patched",
         "glob" => "Explored",
         "grep" => "Searched",
         "list_dir" => "Listed",
@@ -502,6 +514,7 @@ fn label_active(name: &str) -> &'static str {
         "file_read" => "Reading",
         "file_write" => "Writing",
         "file_edit" => "Editing",
+        "apply_patch" => "Patching",
         "glob" => "Exploring",
         "grep" => "Searching",
         "list_dir" => "Listing",
@@ -538,6 +551,122 @@ fn format_activity_row(call: &ToolLifecycleCall) -> String {
     }
 }
 
+struct ReceiptContent {
+    label: String,
+    detail: String,
+    child: Option<String>,
+}
+
+fn file_change_detail(path: &str, added: usize, removed: usize) -> String {
+    let mut detail = trunc(path, 50);
+    if added > 0 {
+        detail.push_str(&format!("  {GREEN}+{added}{RESET}"));
+    }
+    if removed > 0 {
+        detail.push_str(&format!(" {RED}−{removed}{RESET}"));
+    }
+    detail
+}
+
+fn hunk_summary(hunks: usize) -> Option<String> {
+    (hunks > 0).then(|| format!("{hunks} hunk{}", if hunks == 1 { "" } else { "s" }))
+}
+
+fn file_change_receipt_content(call: &PendingCall) -> Option<ReceiptContent> {
+    let output = serde_json::from_str::<Value>(call.output.as_deref()?).ok()?;
+    let path = call.args.get("path").and_then(Value::as_str).unwrap_or("");
+
+    if call.name == "file_write" && output.get("written").and_then(Value::as_bool) == Some(true) {
+        let label = if output.get("created").and_then(Value::as_bool) == Some(true) {
+            "Created"
+        } else {
+            "Wrote"
+        };
+        let added = output
+            .get("addedLines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = output
+            .get("removedLines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return Some(ReceiptContent {
+            label: label.into(),
+            detail: file_change_detail(path, added as usize, removed as usize),
+            child: None,
+        });
+    }
+
+    if call.name == "file_edit" && output.get("edited").and_then(Value::as_bool) == Some(true) {
+        if output.get("created").and_then(Value::as_bool) == Some(true) {
+            let added = output
+                .get("addedLines")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let removed = output
+                .get("removedLines")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            return Some(ReceiptContent {
+                label: "Created".into(),
+                detail: file_change_detail(path, added, removed),
+                child: None,
+            });
+        }
+        let stats = output
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(crate::tools::diff::diff_stats)?;
+        let mut child = hunk_summary(stats.hunks);
+        if output.get("verified").and_then(Value::as_bool) == Some(false) {
+            let warning = format!("{YELLOW}unverified — disk differs{RESET}");
+            child = Some(match child {
+                Some(summary) => format!("{summary} · {warning}"),
+                None => warning,
+            });
+        }
+        return Some(ReceiptContent {
+            label: "Edited".into(),
+            detail: file_change_detail(path, stats.added, stats.removed),
+            child,
+        });
+    }
+
+    if call.name == "apply_patch" && output.get("applied").and_then(Value::as_bool) == Some(true) {
+        let stats = output
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(crate::tools::diff::diff_stats)?;
+        let files = output.get("files").and_then(Value::as_array)?;
+        let target = match files.as_slice() {
+            [file] => file.as_str().unwrap_or("file").to_string(),
+            _ => format!("{} files", files.len()),
+        };
+        return Some(ReceiptContent {
+            label: "Patched".into(),
+            detail: file_change_detail(&target, stats.added, stats.removed),
+            child: hunk_summary(stats.hunks),
+        });
+    }
+
+    None
+}
+
+fn receipt_content(call: &PendingCall) -> ReceiptContent {
+    if let Some(content) = file_change_receipt_content(call) {
+        return content;
+    }
+    ReceiptContent {
+        label: label_past(&call.name).into(),
+        detail: formatter_for(&call.name, &call.args),
+        child: call
+            .output
+            .as_deref()
+            .map(summarize_output)
+            .filter(|summary| !summary.is_empty()),
+    }
+}
+
 /// Format one completed tool as a self-contained transcript receipt.
 ///
 /// Every physical row explicitly returns to column zero. This is defensive in
@@ -545,21 +674,18 @@ fn format_activity_row(call: &ToolLifecycleCall) -> String {
 /// cursor column somewhere other than the left edge even after their visible
 /// content has been cleared.
 fn format_grouped_receipt(call: &PendingCall) -> String {
-    let label = label_past(&call.name);
-    let arg_str = formatter_for(&call.name, &call.args);
+    let content = receipt_content(call);
     let duration = call
         .duration
         .filter(|duration| *duration >= Duration::from_secs(1))
         .map(|duration| format!("  {GRAY}· {:.1}s{RESET}", duration.as_secs_f64()))
         .unwrap_or_default();
     let mut rows = vec![format!(
-        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}{duration}"
+        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{}{RESET}  {TEXT}{}{RESET}{duration}",
+        content.label, content.detail
     )];
-    if let Some(output) = &call.output {
-        let summary = summarize_output(output);
-        if !summary.is_empty() {
-            rows.push(format!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}"));
-        }
+    if let Some(summary) = content.child {
+        rows.push(format!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}"));
     }
 
     let mut receipt = String::from("\r\n");
@@ -1498,6 +1624,148 @@ mod verbose_tests {
             receipt.contains("· 2.4s"),
             "slow duration missing: {receipt:?}"
         );
+    }
+
+    #[test]
+    fn created_file_receipt_shows_semantic_line_count() {
+        let call = PendingCall {
+            name: "file_write".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "content": "alpha\nbeta"
+            }),
+            output: Some(
+                serde_json::json!({
+                    "written": true,
+                    "created": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "addedLines": 2,
+                    "removedLines": 0,
+                    "hunks": 1
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Created"));
+        assert!(receipt.contains(".albatross/ui-receipt-demo.txt"));
+        assert!(receipt.contains("+2"));
+        assert!(!receipt.contains("path="));
+        assert!(!receipt.contains("wrote"));
+    }
+
+    #[test]
+    fn edited_file_receipt_shows_add_remove_and_hunk_counts() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "edits": [{"old_text": "beta", "new_text": "beta-polished"}]
+            }),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "diff": "--- .albatross/ui-receipt-demo.txt\n+++ .albatross/ui-receipt-demo.txt\n@@ -2 +2 @@\n-beta\n+beta-polished",
+                    "verified": true
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Edited"));
+        assert!(receipt.contains(".albatross/ui-receipt-demo.txt"));
+        assert!(receipt.contains("+1"));
+        assert!(receipt.contains("−1"));
+        assert!(receipt.contains("└ 1 hunk"));
+        assert!(!receipt.contains("path="));
+    }
+
+    #[test]
+    fn file_edit_creation_is_presented_as_created_not_edited() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "edits": [{"old_text": "", "new_text": "alpha\nbeta"}]
+            }),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "created": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "addedLines": 2,
+                    "removedLines": 0,
+                    "hunks": 1,
+                    "verified": true
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Created"));
+        assert!(!receipt.contains("Edited"));
+        assert!(receipt.contains("+2"));
+    }
+
+    #[test]
+    fn unverified_edit_receipt_keeps_the_disk_warning() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "path": "src/main.rs",
+                    "diff": "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new",
+                    "verified": false
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("1 hunk"));
+        assert!(receipt.contains("unverified — disk differs"));
+    }
+
+    #[test]
+    fn applied_patch_receipt_uses_file_change_vocabulary() {
+        let diff = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new";
+        let call = PendingCall {
+            name: "apply_patch".into(),
+            args: serde_json::json!({"patch": diff}),
+            output: Some(
+                serde_json::json!({
+                    "applied": true,
+                    "path": ".",
+                    "files": ["src/main.rs"],
+                    "diff": diff
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Patched"));
+        assert!(receipt.contains("src/main.rs"));
+        assert!(receipt.contains("+1"));
+        assert!(receipt.contains("−1"));
+        assert!(receipt.contains("1 hunk"));
+        assert!(!receipt.contains("patch="));
     }
 
     #[test]
