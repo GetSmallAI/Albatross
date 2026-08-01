@@ -462,6 +462,7 @@ impl TuiRenderer {
                 self.end_answer();
                 self.render_tool_call(&name, &call_id, args, depth)
             }
+            AgentEvent::ToolExecutionStarted { .. } => {}
             AgentEvent::ToolResult {
                 name,
                 call_id,

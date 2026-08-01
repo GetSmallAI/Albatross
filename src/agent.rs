@@ -44,6 +44,12 @@ pub enum AgentEvent {
         args: Value,
         depth: u32,
     },
+    /// The tool passed hooks and approval and is about to execute. Keeping
+    /// this separate from `ToolCall` prevents the UI from claiming work is
+    /// running while the user is still deciding whether to allow it.
+    ToolExecutionStarted {
+        name: String,
+    },
     ToolResult {
         name: String,
         call_id: String,
@@ -786,6 +792,9 @@ where
                     args,
                     read_only: true,
                 } => {
+                    on_event(AgentEvent::ToolExecutionStarted {
+                        name: tcs[i].function.name.clone(),
+                    });
                     let c = cancel.clone();
                     read_idx.push(i);
                     read_futs.push(async move {
@@ -812,6 +821,9 @@ where
         }
 
         for (i, tool, args) in serial {
+            on_event(AgentEvent::ToolExecutionStarted {
+                name: tcs[i].function.name.clone(),
+            });
             let start = Instant::now();
             outputs[i] = Some(value_to_string(
                 &tool.execute_cancelable(args, cancel.clone()).await,

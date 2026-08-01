@@ -788,25 +788,19 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 
     let mut memory_changed = false;
     let loader_style = state.config.display.loader_style;
-    let default_loader_text = state.config.display.loader_text.clone();
     let drain_fut = async {
         while let Some(e) = rx.recv().await {
             if let Some(l) = loader_opt.take() {
                 l.stop();
             }
-            if let AgentEvent::ToolCall { name, .. } = &e {
-                tool_calls.push(name.clone());
-                if let Some(loader) = loader_opt.as_mut() {
-                    loader.set_text(format!("Running {name}…"));
-                } else {
-                    loader_opt = Some(Loader::start(format!("Running {name}…"), loader_style));
+            let next_activity = match &e {
+                AgentEvent::ToolCall { name, .. } => {
+                    tool_calls.push(name.clone());
+                    None
                 }
-            }
-            if let AgentEvent::ToolResult { .. } = &e {
-                if let Some(loader) = loader_opt.as_mut() {
-                    loader.set_text(default_loader_text.clone());
-                }
-            }
+                AgentEvent::ToolExecutionStarted { name, .. } => Some(format!("Running {name}…")),
+                _ => None,
+            };
             if let AgentEvent::ToolResult { name, output, .. } = &e {
                 if tool_output_mutated_workspace(name, output) {
                     memory_changed = true;
@@ -823,6 +817,12 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 }
             }
             state.renderer.handle(e);
+            if let Some(text) = next_activity {
+                // Permanent transcript output owns the current line. Start the
+                // transient activity row only after that output has completed,
+                // so the two can never render side-by-side.
+                loader_opt = Some(Loader::start(text, loader_style));
+            }
         }
     };
 
