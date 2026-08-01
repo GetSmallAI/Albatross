@@ -240,6 +240,83 @@ async fn denied_tools_never_emit_running_activity() {
 }
 
 #[tokio::test]
+async fn confirmation_only_shell_calls_after_success_never_reach_the_ui() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_desc = mock_backend(&listener);
+    let requested_call = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_requested\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"printf 'alpha\\\\nbeta\\\\ngamma\\\\n'\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let redundant_call = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redundant\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"true\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Ran successfully.\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_mock_server(listener, vec![requested_call, redundant_call, answer]);
+
+    let mut config = AgentConfig::default();
+    config.workspace_root = fixture_workspace().display().to_string();
+    config.approval_policy = crate::config::ApprovalPolicy::Never;
+    config.tools = vec!["shell".into()];
+    config.tool_selection = crate::config::ToolSelection::Fixed;
+
+    let tools = build_tools_for_names(&config, &config.tools, None);
+    let http = build_http_client();
+    let mut lifecycle = Vec::new();
+
+    run_agent(
+        &http,
+        &backend_desc,
+        "mock",
+        None,
+        vec![ChatMessage::User {
+            content: "Run the requested command, then briefly confirm.".into(),
+        }],
+        tools,
+        6,
+        |event| match event {
+            AgentEvent::ToolCall { call_id, .. } => lifecycle.push(format!("announced:{call_id}")),
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"))
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"))
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, .. } => {
+                lifecycle.push(format!("execution-skipped:{call_id}"))
+            }
+            AgentEvent::ToolResult { call_id, .. } => lifecycle.push(format!("receipt:{call_id}")),
+            _ => {}
+        },
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    server.join().unwrap();
+    assert_eq!(
+        lifecycle,
+        [
+            "announced:call_requested",
+            "running:call_requested",
+            "execution-finished:call_requested",
+            "receipt:call_requested",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn step_limit_surfaces_hit_step_limit() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let backend_desc = mock_backend(&listener);

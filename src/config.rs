@@ -704,6 +704,9 @@ const SYSTEM_PROMPT: &str = concat!(
     "  output, file contents, search matches, test logs, or diffs verbatim unless\n",
     "  the user explicitly asks to see them. State the conclusion or action\n",
     "  instead; when asked to briefly confirm, use one sentence.\n",
+    "- Once the requested action succeeds, stop calling tools and respond. Never\n",
+    "  run a no-op or confirmation command such as `true`, `echo done`, or a\n",
+    "  duplicate read just to prove that the prior tool call completed.\n",
     "\n",
     "When the user asks you to create or change code or files:\n",
     "- DO write the changes to disk with the file tools: file_write to create a\n",
@@ -1436,6 +1439,14 @@ mod tests {
         assert!(prompt.contains("Tool results are already visible in the transcript"));
         assert!(prompt.contains("Do not repeat shell"));
         assert!(prompt.contains("when asked to briefly confirm, use one sentence"));
+    }
+
+    #[test]
+    fn default_prompt_prevents_confirmation_only_tool_calls() {
+        let prompt = AgentConfig::default().render_system_prompt();
+
+        assert!(prompt.contains("Once the requested action succeeds, stop calling tools"));
+        assert!(prompt.contains("Never\n  run a no-op or confirmation command"));
     }
 
     #[test]

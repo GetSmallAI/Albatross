@@ -264,6 +264,57 @@ fn hook_block_output(reason: &str) -> String {
         .unwrap_or_else(|_| "{\"error\":\"hook blocked execution\"}".to_string())
 }
 
+fn tool_result_succeeded(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return true;
+    };
+    value.get("error").is_none()
+        && value
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_none_or(|code| code == 0)
+        && value
+            .get("failed")
+            .and_then(Value::as_u64)
+            .is_none_or(|failed| failed == 0)
+        && !value
+            .get("timedOut")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn confirmation_only_shell_call(name: &str, args: &Value, user_request: &str) -> bool {
+    if name != "shell" {
+        return false;
+    }
+    let Some(command) = args.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    let command = command.trim();
+    if command.is_empty() || user_request.contains(command) {
+        return false;
+    }
+    let normalized = command.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "true" | ":" | "/bin/true" | "/usr/bin/true"
+    ) || matches!(
+        normalized
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["echo", "done" | "ok" | "success" | "successful"]
+    )
+}
+
+fn redundant_tool_output() -> String {
+    serde_json::json!({
+        "skipped": true,
+        "reason": "The requested action already succeeded. Respond without another tool call."
+    })
+    .to_string()
+}
+
 fn auto_compact_due(
     messages: &[ChatMessage],
     system_prompt: &str,
@@ -333,6 +384,14 @@ where
     F: FnMut(AgentEvent),
 {
     let mut messages = initial_messages;
+    let user_request = messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ChatMessage::User { content } => Some(content.as_text().into_owned()),
+            _ => None,
+        })
+        .unwrap_or_default();
     let tool_defs = to_openai_tools(&tools);
     let tool_map: HashMap<String, Arc<dyn Tool>> = tools
         .iter()
@@ -360,6 +419,7 @@ where
     let mut metrics = TurnMetrics::default();
     let mut ttft_recorded = false;
     let mut steps_taken = 0usize;
+    let mut successful_action_seen = false;
 
     let log_trace = |payload: TracePayload| {
         if let Some(trace) = &trace {
@@ -555,6 +615,7 @@ where
         let mut tool_inputs: Vec<Value> = Vec::with_capacity(final_calls.len());
         let mut original_tool_inputs: Vec<Option<Value>> = Vec::with_capacity(final_calls.len());
         let mut run_post_hooks: Vec<bool> = Vec::with_capacity(final_calls.len());
+        let mut suppress_events: Vec<bool> = Vec::with_capacity(final_calls.len());
         let mut pending: Vec<Pending> = Vec::with_capacity(final_calls.len());
         let mut hook_contexts: Vec<String> = Vec::new();
         let mut stop_after_step = false;
@@ -563,6 +624,17 @@ where
         for mut tc in final_calls {
             let mut parsed_args: Value = serde_json::from_str(&tc.function.arguments)
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+            if successful_action_seen
+                && confirmation_only_shell_call(&tc.function.name, &parsed_args, &user_request)
+            {
+                tool_inputs.push(parsed_args);
+                original_tool_inputs.push(None);
+                run_post_hooks.push(false);
+                suppress_events.push(true);
+                tcs.push(tc);
+                pending.push(Pending::Done(redundant_tool_output()));
+                continue;
+            }
             if let Some(reason) = stop_remaining_reason.clone() {
                 on_event(AgentEvent::ToolCall {
                     name: tc.function.name.clone(),
@@ -579,6 +651,7 @@ where
                 tool_inputs.push(parsed_args);
                 original_tool_inputs.push(None);
                 run_post_hooks.push(false);
+                suppress_events.push(false);
                 tcs.push(tc);
                 pending.push(Pending::Done(hook_block_output(&reason)));
                 continue;
@@ -770,6 +843,7 @@ where
             tool_inputs.push(parsed_args);
             original_tool_inputs.push(rewritten_original_args);
             run_post_hooks.push(run_post_hook);
+            suppress_events.push(false);
             tcs.push(tc);
             pending.push(entry);
         }
@@ -807,10 +881,12 @@ where
             match entry {
                 Pending::Done(out) => {
                     outputs[i] = Some(out);
-                    on_event(AgentEvent::ToolExecutionSkipped {
-                        call_id: tcs[i].id.clone(),
-                        depth,
-                    });
+                    if !suppress_events[i] {
+                        on_event(AgentEvent::ToolExecutionSkipped {
+                            call_id: tcs[i].id.clone(),
+                            depth,
+                        });
+                    }
                 }
                 Pending::Run {
                     tool,
@@ -870,15 +946,22 @@ where
             });
         }
 
-        for (((((tc, output), duration_ms), tool_input), original_tool_input), run_post_hook) in tcs
+        for (
+            (((((tc, output), duration_ms), tool_input), original_tool_input), run_post_hook),
+            suppress_event,
+        ) in tcs
             .into_iter()
             .zip(outputs)
             .zip(tool_durations)
             .zip(tool_inputs)
             .zip(original_tool_inputs)
             .zip(run_post_hooks)
+            .zip(suppress_events)
         {
             let output_str = output.unwrap_or_else(|| "null".into());
+            if run_post_hook && tool_result_succeeded(&output_str) {
+                successful_action_seen = true;
+            }
             let (mut trimmed, compact_info) = compact_tool_output(&tc.function.name, &output_str);
             if tc.function.name == "update_plan" {
                 if let Some(hooks_ref) = hooks.as_ref() {
@@ -963,28 +1046,30 @@ where
                     stop_after_step = true;
                 }
             }
-            if let Some(info) = &compact_info {
-                on_event(AgentEvent::ToolOutputCompacted {
+            if !suppress_event {
+                if let Some(info) = &compact_info {
+                    on_event(AgentEvent::ToolOutputCompacted {
+                        name: tc.function.name.clone(),
+                        call_id: tc.id.clone(),
+                        summary: info.summary.clone(),
+                        depth,
+                    });
+                }
+                on_event(AgentEvent::ToolResult {
                     name: tc.function.name.clone(),
                     call_id: tc.id.clone(),
-                    summary: info.summary.clone(),
+                    output: trimmed.clone(),
+                    depth,
+                });
+                log_trace(TracePayload::ToolResult {
+                    call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    duration_ms,
+                    compacted: compact_info.is_some(),
+                    compact_summary: compact_info.as_ref().map(|i| i.summary.clone()),
                     depth,
                 });
             }
-            on_event(AgentEvent::ToolResult {
-                name: tc.function.name.clone(),
-                call_id: tc.id.clone(),
-                output: trimmed.clone(),
-                depth,
-            });
-            log_trace(TracePayload::ToolResult {
-                call_id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                duration_ms,
-                compacted: compact_info.is_some(),
-                compact_summary: compact_info.as_ref().map(|i| i.summary.clone()),
-                depth,
-            });
             messages.push(ChatMessage::Tool {
                 tool_call_id: tc.id,
                 content: trimmed,
