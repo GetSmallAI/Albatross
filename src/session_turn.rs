@@ -196,8 +196,32 @@ fn format_cost_suffix(
     }
 }
 
-fn format_timing_suffix(metrics: &TurnMetrics) -> String {
-    metrics.format_footer_suffix()
+fn format_compact_cost_suffix(
+    turn_cost: Option<f64>,
+    backend_is_local: bool,
+    session_usd: f64,
+    has_unknown: bool,
+) -> String {
+    if turn_cost.is_none() && !backend_is_local {
+        if session_usd == 0.0 {
+            return String::new();
+        }
+        let session_prefix = if has_unknown { "≥" } else { "" };
+        return format!("{session_prefix}{} session", format_usd(session_usd));
+    }
+    format_cost_suffix(turn_cost, backend_is_local, session_usd, has_unknown)
+}
+
+fn format_compact_timing(metrics: &TurnMetrics) -> String {
+    let mut parts = Vec::new();
+    if metrics.steps > 0 {
+        let noun = if metrics.steps == 1 { "step" } else { "steps" };
+        parts.push(format!("{} {noun}", metrics.steps));
+    }
+    if metrics.total_ms > 0 {
+        parts.push(format!("{:.1}s", metrics.total_ms as f64 / 1000.0));
+    }
+    parts.join(" · ")
 }
 
 fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
@@ -206,11 +230,7 @@ fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
         .unwrap_or_default()
 }
 
-/// Join the non-empty footer parts with a single `" · "` separator, so
-/// individual suffix builders don't each bake in their own leading
-/// separator (which used to make empty-part handling error-prone).
-#[allow(clippy::too_many_arguments)]
-fn format_footer(
+struct TurnFooter<'a> {
     input_tokens: u32,
     output_tokens: u32,
     cached_input_tokens: u32,
@@ -219,51 +239,100 @@ fn format_footer(
     session_usd: f64,
     session_cost_has_unknown: bool,
     effort: Option<EffortLevel>,
-    metrics: &TurnMetrics,
-    path_suffix: &str,
-    scorecard_suffix: &str,
-    fable_suffix: &str,
-    model: &str,
-) -> String {
-    let mut parts = vec![
-        format!("{} in", format_tokens(input_tokens)),
-        format!("{} out", format_tokens(output_tokens)),
+    metrics: &'a TurnMetrics,
+    path_suffix: &'a str,
+    fable_suffix: &'a str,
+    model: &'a str,
+}
+
+/// Join non-empty footer parts at semantic boundaries and wrap them within the
+/// terminal width. The caller supplies one turn summary; layout details stay
+/// inside this module.
+fn format_footer(input: &TurnFooter<'_>) -> String {
+    format_footer_at_width(input, crate::theme::cols())
+}
+
+fn format_footer_at_width(input: &TurnFooter<'_>, width: usize) -> String {
+    let mut primary = vec![
+        format!("{} in", format_tokens(input.input_tokens)),
+        format!("{} out", format_tokens(input.output_tokens)),
     ];
     // Only surface cache reuse when the provider reported it, so local backends
     // (which never report cached tokens) don't get a misleading "0 cached".
-    if cached_input_tokens > 0 {
-        parts.push(format!("{} cached", format_tokens(cached_input_tokens)));
+    if input.cached_input_tokens > 0 {
+        primary.push(format!(
+            "{} cached",
+            format_tokens(input.cached_input_tokens)
+        ));
     }
-    let cost = format_cost_suffix(
-        turn_cost,
-        backend_is_local,
-        session_usd,
-        session_cost_has_unknown,
+    let timing = format_compact_timing(input.metrics);
+    if !timing.is_empty() {
+        primary.push(timing);
+    }
+    if !input.model.is_empty() {
+        primary.push(input.model.to_string());
+    }
+
+    let mut secondary = Vec::new();
+    let cost = format_compact_cost_suffix(
+        input.turn_cost,
+        input.backend_is_local,
+        input.session_usd,
+        input.session_cost_has_unknown,
     );
     if !cost.is_empty() {
-        parts.push(cost);
+        secondary.push(cost);
     }
-    let effort_part = format_effort_suffix(effort);
+    let effort_part = format_effort_suffix(input.effort);
     if !effort_part.is_empty() {
-        parts.push(effort_part);
+        secondary.push(effort_part);
     }
-    let timing = format_timing_suffix(metrics);
-    if !timing.is_empty() {
-        parts.push(timing);
+    if !input.path_suffix.is_empty() {
+        secondary.push(input.path_suffix.to_string());
     }
-    if !path_suffix.is_empty() {
-        parts.push(path_suffix.to_string());
+    if !input.fable_suffix.is_empty() {
+        secondary.push(input.fable_suffix.to_string());
     }
-    if !scorecard_suffix.is_empty() {
-        parts.push(scorecard_suffix.to_string());
+
+    let mut rows = wrap_footer_parts(&primary, width, "  ", "    ");
+    rows.extend(wrap_footer_parts(&secondary, width, "    ", "    "));
+    rows.into_iter()
+        .map(|row| format!("{GRAY}{row}{RESET}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wrap_footer_parts(
+    parts: &[String],
+    width: usize,
+    first_prefix: &str,
+    continuation_prefix: &str,
+) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
     }
-    if !fable_suffix.is_empty() {
-        parts.push(fable_suffix.to_string());
+    let width = width.max(20);
+    let mut rows = Vec::new();
+    let first_width = width.saturating_sub(crate::theme::visible_len(first_prefix));
+    let mut current = format!(
+        "{first_prefix}{}",
+        crate::theme::truncate_visible(&parts[0], first_width)
+    );
+    for part in &parts[1..] {
+        let candidate = format!("{current} · {part}");
+        if crate::theme::visible_len(&candidate) <= width {
+            current = candidate;
+        } else {
+            rows.push(current);
+            let part_width = width.saturating_sub(crate::theme::visible_len(continuation_prefix));
+            current = format!(
+                "{continuation_prefix}{}",
+                crate::theme::truncate_visible(part, part_width)
+            );
+        }
     }
-    if !model.is_empty() {
-        parts.push(model.to_string());
-    }
-    format!("{GRAY}  {}{RESET}", parts.join(" · "))
+    rows.push(current);
+    rows
 }
 
 fn prompt_fingerprint(
@@ -1042,12 +1111,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
-    let scorecard_suffix = crate::scorecard::format_scorecard_suffix(
-        &state.config.workspace_root,
-        state.config.scorecard.enabled,
-        state.config.scorecard.nudge_min_turns,
-    )
-    .unwrap_or_default();
     let fable_suffix = if state.config.fable.enabled
         && crate::fable_usage::is_fable_model(&state.config.fable, &state.model)
     {
@@ -1064,23 +1127,23 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     // One leading blank separates the quiet stats footer from the turn's
     // response and any checkpoint/test notices above it.
     println!();
+    let path_suffix = format_path_suffix(state);
     println!(
         "{}",
-        format_footer(
-            res.input_tokens,
-            res.output_tokens,
-            res.cached_input_tokens,
+        format_footer(&TurnFooter {
+            input_tokens: res.input_tokens,
+            output_tokens: res.output_tokens,
+            cached_input_tokens: res.cached_input_tokens,
             turn_cost,
-            state.config.backend.is_local(),
-            state.session_usd,
-            state.session_cost_has_unknown,
-            state.active_effort,
-            &metrics,
-            &format_path_suffix(state),
-            &scorecard_suffix,
-            &fable_suffix,
-            &state.model,
-        )
+            backend_is_local: state.config.backend.is_local(),
+            session_usd: state.session_usd,
+            session_cost_has_unknown: state.session_cost_has_unknown,
+            effort: state.active_effort,
+            metrics: &metrics,
+            path_suffix: &path_suffix,
+            fable_suffix: &fable_suffix,
+            model: &state.model,
+        })
     );
 
     Ok(TurnOutcome {
@@ -1095,6 +1158,74 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_footer(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_input_tokens: u32,
+        turn_cost: Option<f64>,
+        backend_is_local: bool,
+        session_usd: f64,
+        session_cost_has_unknown: bool,
+        effort: Option<EffortLevel>,
+        metrics: &TurnMetrics,
+        path_suffix: &str,
+        _scorecard_suffix: &str,
+        fable_suffix: &str,
+        model: &str,
+    ) -> String {
+        format_footer(&TurnFooter {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            turn_cost,
+            backend_is_local,
+            session_usd,
+            session_cost_has_unknown,
+            effort,
+            metrics,
+            path_suffix,
+            fable_suffix,
+            model,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_footer_at_width(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_input_tokens: u32,
+        turn_cost: Option<f64>,
+        backend_is_local: bool,
+        session_usd: f64,
+        session_cost_has_unknown: bool,
+        effort: Option<EffortLevel>,
+        metrics: &TurnMetrics,
+        path_suffix: &str,
+        _scorecard_suffix: &str,
+        fable_suffix: &str,
+        model: &str,
+        width: usize,
+    ) -> String {
+        format_footer_at_width(
+            &TurnFooter {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                turn_cost,
+                backend_is_local,
+                session_usd,
+                session_cost_has_unknown,
+                effort,
+                metrics,
+                path_suffix,
+                fable_suffix,
+                model,
+            },
+            width,
+        )
+    }
 
     #[test]
     fn model_activity_routes_transient_and_permanent_events_without_overlap() {
@@ -1351,7 +1482,7 @@ mod cost_tests {
     #[test]
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
+        let footer = test_footer(
             1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
@@ -1364,7 +1495,7 @@ mod cost_tests {
     }
 
     #[test]
-    fn footer_joins_all_present_parts_with_single_separator() {
+    fn footer_preserves_user_facing_context_without_scorecard_noise() {
         let metrics = TurnMetrics {
             steps: 2,
             ttft_ms: None,
@@ -1374,7 +1505,7 @@ mod cost_tests {
             total_ms: 1000,
             hit_step_limit: false,
         };
-        let footer = format_footer(
+        let footer = test_footer(
             500,
             120,
             0,
@@ -1389,17 +1520,180 @@ mod cost_tests {
             "Fable 25.0k / 50.0k wk (50%)",
             "grok-4.5",
         );
-        assert!(footer.contains("500 in · 120 out · $0.01 this turn · $0.01 session · effort high"));
+        assert!(footer.contains("500 in · 120 out · 2 steps · 1.0s · grok-4.5"));
+        assert!(footer.contains("$0.01 this turn · $0.01 session"));
+        assert!(footer.contains("effort high"));
         assert!(footer.contains("path: main · 2 paths"));
-        assert!(footer.contains("3 turn(s) tracked"));
         assert!(footer.contains("Fable 25.0k / 50.0k wk (50%)"));
-        assert!(footer.ends_with(&format!("grok-4.5{RESET}")));
+        assert!(!footer.contains("3 turn(s) tracked"));
+        assert!(!footer.contains("/ship"));
+    }
+
+    #[test]
+    fn compact_footer_keeps_operational_jargon_out_of_normal_turns() {
+        let metrics = TurnMetrics {
+            steps: 2,
+            ttft_ms: Some(800),
+            model_ms: 1300,
+            tool_ms: 200,
+            approval_ms: 0,
+            total_ms: 1500,
+            hit_step_limit: false,
+        };
+
+        let footer = test_footer(
+            2700,
+            15,
+            2600,
+            None,
+            false,
+            0.0,
+            true,
+            None,
+            &metrics,
+            "",
+            "6 turn(s) tracked · /ship pr closes scorecard",
+            "",
+            "grok-4.5",
+        );
+
+        assert!(footer.contains("2.7k in · 15 out · 2.6k cached"));
+        assert!(footer.contains("2 steps · 1.5s"));
+        assert!(!footer.contains("TTFT"));
+        assert!(!footer.contains("model 1.3s"));
+        assert!(!footer.contains("/ship"));
+        assert!(!footer.contains("scorecard"));
+        assert!(!footer.contains("turn(s) tracked"));
+    }
+
+    #[test]
+    fn compact_footer_separates_primary_metrics_from_secondary_context() {
+        let metrics = TurnMetrics {
+            steps: 2,
+            total_ms: 1500,
+            ..TurnMetrics::default()
+        };
+
+        let footer = test_footer(
+            500,
+            120,
+            0,
+            Some(0.01),
+            false,
+            0.04,
+            false,
+            Some(EffortLevel::High),
+            &metrics,
+            "path: main · 2 paths",
+            "",
+            "Fable 25.0k / 50.0k wk (50%)",
+            "grok-4.5",
+        );
+        let rows = footer.lines().collect::<Vec<_>>();
+
+        assert!(rows.len() >= 2, "primary receipt + secondary context");
+        assert!(rows[0].contains("500 in · 120 out · 2 steps · 1.5s · grok-4.5"));
+        assert!(!rows[0].contains('$'));
+        let secondary = rows[1..].join("\n");
+        assert!(secondary.contains("$0.01 this turn · $0.04 session"));
+        assert!(secondary.contains("effort high"));
+        assert!(secondary.contains("path: main · 2 paths"));
+        assert!(secondary.contains("Fable 25.0k / 50.0k wk (50%)"));
+    }
+
+    #[test]
+    fn compact_footer_omits_unknown_zero_cost_noise() {
+        let footer = test_footer(
+            2700,
+            15,
+            2600,
+            None,
+            false,
+            0.0,
+            true,
+            None,
+            &TurnMetrics::default(),
+            "",
+            "",
+            "",
+            "grok-4.5",
+        );
+
+        assert!(!footer.contains("$?"));
+        assert!(!footer.contains("≥$0.00"));
+        assert_eq!(footer.lines().count(), 1);
+    }
+
+    #[test]
+    fn compact_footer_wraps_at_metric_boundaries_on_narrow_terminals() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+        let footer = test_footer_at_width(
+            12_700,
+            845,
+            11_900,
+            Some(0.013),
+            false,
+            0.094,
+            false,
+            None,
+            &metrics,
+            "",
+            "",
+            "",
+            "grok-4.5",
+            42,
+        );
+
+        assert!(footer.lines().count() > 1);
+        assert!(
+            footer
+                .lines()
+                .all(|row| crate::theme::visible_len(row) <= 42),
+            "footer exceeded terminal width: {footer:?}"
+        );
+        assert!(footer.contains("12.7k in"));
+        assert!(footer.contains("845 out"));
+        assert!(footer.contains("11.9k cached"));
+        assert!(footer.contains("3 steps"));
+        assert!(footer.contains("2.5s"));
+    }
+
+    #[test]
+    fn compact_footer_truncates_one_oversized_metric_instead_of_terminal_wrapping() {
+        let footer = test_footer_at_width(
+            100,
+            20,
+            0,
+            None,
+            true,
+            0.0,
+            false,
+            None,
+            &TurnMetrics::default(),
+            "",
+            "",
+            "",
+            "provider/a-very-long-versioned-model-name",
+            32,
+        );
+
+        assert!(footer.contains('…'));
+        assert!(
+            footer
+                .lines()
+                .all(|row| crate::theme::visible_len(row) <= 32),
+            "oversized footer metric wrapped: {footer:?}"
+        );
     }
 
     #[test]
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
+        let footer = test_footer(
             100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
@@ -1410,7 +1704,7 @@ mod cost_tests {
     #[test]
     fn local_backend_footer_has_no_cost_part() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
+        let footer = test_footer(
             100,
             50,
             0,
@@ -1434,31 +1728,15 @@ mod cost_tests {
     fn footer_shows_cached_tokens_only_when_present() {
         let metrics = TurnMetrics::default();
         // Provider reported a cache hit: surface it between out and cost.
-        let hit = format_footer(
+        let hit = test_footer(
             1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(hit.contains("1.2k in · 87 out · 900 cached"));
         // No cache hit reported: no "cached" part at all.
-        let miss = format_footer(
+        let miss = test_footer(
             1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(!miss.contains("cached"));
-    }
-
-    #[test]
-    fn timing_suffix_includes_steps_and_model_time() {
-        let metrics = TurnMetrics {
-            steps: 3,
-            ttft_ms: Some(500),
-            model_ms: 1200,
-            tool_ms: 800,
-            approval_ms: 0,
-            total_ms: 2500,
-            hit_step_limit: false,
-        };
-        let s = format_timing_suffix(&metrics);
-        assert!(s.contains("3 steps"));
-        assert!(s.contains("model"));
     }
 
     #[test]

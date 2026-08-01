@@ -467,7 +467,10 @@ impl ToolLifecycle {
         let mut text = String::from("\r\n");
         for (index, call) in self.calls.iter().enumerate() {
             text.push('\r');
-            text.push_str(&truncate_ansi_visible(&format_activity_row(call), width));
+            text.push_str(&crate::theme::truncate_visible(
+                &format_activity_row(call),
+                width,
+            ));
             if index + 1 < self.calls.len() {
                 text.push_str("\r\n");
             }
@@ -477,39 +480,6 @@ impl ToolLifecycle {
             rows: self.calls.len() + 1,
         }
     }
-}
-
-fn truncate_ansi_visible(value: &str, max: usize) -> String {
-    if crate::theme::visible_len(value) <= max {
-        return value.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-
-    let target = max.saturating_sub(1);
-    let mut output = String::new();
-    let mut visible = 0usize;
-    let mut in_escape = false;
-    for character in value.chars() {
-        if in_escape {
-            output.push(character);
-            if character == 'm' {
-                in_escape = false;
-            }
-        } else if character == '\x1b' {
-            in_escape = true;
-            output.push(character);
-        } else if visible < target {
-            output.push(character);
-            visible += 1;
-        } else {
-            break;
-        }
-    }
-    output.push('…');
-    output.push_str(&RESET.to_string());
-    output
 }
 
 fn label_active(name: &str) -> &'static str {

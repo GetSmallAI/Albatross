@@ -159,6 +159,41 @@ pub fn visible_len(s: &str) -> usize {
     n
 }
 
+/// Truncate styled terminal text to a visible column limit while preserving
+/// complete ANSI color sequences and restoring the terminal style afterward.
+pub fn truncate_visible(value: &str, max: usize) -> String {
+    if visible_len(value) <= max {
+        return value.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+
+    let target = max.saturating_sub(1);
+    let mut output = String::new();
+    let mut visible = 0usize;
+    let mut in_escape = false;
+    for character in value.chars() {
+        if in_escape {
+            output.push(character);
+            if character == 'm' {
+                in_escape = false;
+            }
+        } else if character == '\x1b' {
+            in_escape = true;
+            output.push(character);
+        } else if visible < target {
+            output.push(character);
+            visible += 1;
+        } else {
+            break;
+        }
+    }
+    output.push('…');
+    output.push_str(&RESET.to_string());
+    output
+}
+
 /// A muted full-width horizontal rule, indented by `PAD`.
 pub fn rule() -> String {
     let dashes = cols().saturating_sub(PAD.len());

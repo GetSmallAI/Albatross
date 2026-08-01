@@ -37,9 +37,9 @@ few that aren't usual:
 
 - **Local or cloud, one TUI.** Switch providers mid-session with
   `/backend <name>` — the tools, commands, and session log don't change.
-- **Per-turn cost on the status line.** `$0.003 this turn · $0.41 session`
-  when pricing is known or reported by the provider. Local turns just show
-  tokens.
+- **Compact turn receipts.** Tokens, steps, total time, and model stay on one
+  primary row. Known cost and other optional context move to indented rows so
+  they never overwhelm the response.
 - **OpenRouter Fusion, one command away.** `/fusion on` switches to the
   `openrouter/fusion` alias for deliberative work; `/fusion tool` attaches
   Fusion to a chosen OpenRouter coding model for hard reviews, architecture
@@ -199,7 +199,8 @@ src/ has 24 Rust files: main.rs is the entry point (input loop, banner,
 warmup); agent.rs runs the chat-completions loop; backends.rs handles the
 providers; tools/ contains the tool implementations…
 
-  1.2k in · 87 out · $0.0003 this turn · $0.0003 session
+  1.2k in · 87 out · 1 step · 1.0s · grok-4.5
+    $0.0003 this turn · $0.0003 session
 
 > add a function in src/util.rs that lowercases a string and trims it
 
@@ -215,7 +216,8 @@ providers; tools/ contains the tool implementations…
 
   Apply? [y/n/a]: y
   checkpoint saved (1 file) — /undo to revert
-  3.4k in · 412 out · $0.001 this turn · $0.0013 session
+  3.4k in · 412 out · 2 steps · 2.4s · grok-4.5
+    $0.001 this turn · $0.0013 session
 ```
 
 A handful of moves worth knowing right away:
@@ -467,18 +469,19 @@ login, `/login grok` can import and refresh those credentials.
 ### Per-turn and session cost
 
 When you're on a cloud backend with known pricing or provider-reported usage
-cost, every turn prints its own cost plus the running session total:
+cost, the compact primary receipt is followed by an indented cost row:
 
 ```text
-  2.1k in · 845 out · $0.013 this turn · $0.094 session
+  2.1k in · 845 out · 2 steps · 2.5s · grok-4.5
+    $0.013 this turn · $0.094 session
 ```
 
-Switch to Ollama mid-session and the line shows `$0.00 this turn` but keeps
-the running total honest. OpenRouter returns `usage.cost` for many requests,
-including dynamic routers like Fusion; Albatross uses that reported value
-when present. If a cloud model does not expose cost, the turn shows `$?` and
-prefixes the session total with `≥` to signal it is a lower bound, not a
-fiction.
+Switch to Ollama mid-session and the secondary row shows `$0.00 this turn`
+while keeping the running total honest. OpenRouter returns `usage.cost` for
+many requests, including dynamic routers like Fusion; Albatross uses that
+reported value when present. Unknown zero-cost state is omitted instead of
+showing `$?`. Once the session has a meaningful known total, `≥` marks it as a
+lower bound when another cloud turn does not expose pricing.
 
 The `/model` picker first accepts an optional text filter, then shows the same
 data in an arrow-key menu. It tags the live session choice `(selected)` and the
@@ -548,9 +551,9 @@ status. `/scorecard verify --all` appends verification events for all recent
 verifiable PRs. This does not rewrite the local close-time score; it adds later
 remote evidence that `/scorecard pr <n>` renders next to the original audit.
 
-After enough turns on a feature branch, the turn footer nudges you to close via
-`/ship pr`. Audit snapshots come from local event logs at close time; export raw
-traces with `/export <session> events`.
+Use `/scorecard status` when you want the open branch total and `/ship pr` when
+you are ready to close it. Audit snapshots come from local event logs at close
+time; export raw traces with `/export <session> events`.
 
 A PR counts as quality-shipped when its local score meets `scorecard.qualityThreshold`
 (default 80), tests passed, readiness was not blocked, and either the PR
@@ -1153,9 +1156,9 @@ runtime.
   is also logged to a sidecar at `.sessions/<session-id>.events.jsonl` with
   tool calls, approvals, compaction, warmup, and timing — enabled by default
   via `display.eventLog.enabled` in `agent.config.json`.
-- **Turn footer timing.** After each turn the status line includes step count
-  and a breakdown when available: `TTFT`, `model`, `tools`, `approval`, and
-  `total` seconds alongside the existing token and cost stats.
+- **Turn footer timing.** After each turn the primary receipt includes step
+  count and total time. Detailed `TTFT`, model, tool, and approval timing stays
+  in the event log and scorecard diagnostics instead of crowding conversation.
 - **Slash-command completion.** Type `/` and a menu of matching commands (with
   descriptions) appears beneath the prompt; the best match also shows as dim
   ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**
