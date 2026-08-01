@@ -54,6 +54,38 @@ pub struct TurnOptions {
     pub source: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelActivityAction {
+    Keep,
+    Replace(String),
+    Clear,
+}
+
+fn model_activity_action(
+    event: &AgentEvent,
+    reasoning_visible: bool,
+    renderer_manages_tools: bool,
+) -> ModelActivityAction {
+    match event {
+        AgentEvent::ModelRequestStarted => ModelActivityAction::Replace("Thinking".into()),
+        AgentEvent::Reasoning { .. } if !reasoning_visible => ModelActivityAction::Keep,
+        AgentEvent::ToolExecutionStarted { name, .. } if !renderer_manages_tools => {
+            ModelActivityAction::Replace(format!("Running {name}"))
+        }
+        AgentEvent::Text { .. }
+        | AgentEvent::ToolCall { .. }
+        | AgentEvent::ToolExecutionStarted { .. }
+        | AgentEvent::ToolExecutionFinished { .. }
+        | AgentEvent::ToolExecutionSkipped { .. }
+        | AgentEvent::ToolResult { .. }
+        | AgentEvent::ToolOutputCompacted { .. }
+        | AgentEvent::Reasoning { .. }
+        | AgentEvent::ContextCompacted { .. }
+        | AgentEvent::HookNotice(_)
+        | AgentEvent::StepLimitReached { .. } => ModelActivityAction::Clear,
+    }
+}
+
 #[allow(dead_code)]
 pub struct TurnOutcome {
     pub run_result: RunResult,
@@ -672,13 +704,11 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         &system_prompt,
         &active_tool_names,
     );
-    if std::env::var("WARMUP").as_deref() != Ok("false")
+    let model_activity = if std::env::var("WARMUP").as_deref() != Ok("false")
         && state.warmed_fingerprint != Some(fingerprint)
     {
-        let loader = Loader::start(
-            "Warming prompt cache".into(),
-            state.config.display.loader_style,
-        );
+        let mut activity =
+            Loader::start("Preparing prompt".into(), state.config.display.loader_style);
         let warm_result = warmup(
             &state.http,
             &state.backend,
@@ -688,13 +718,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &tool_defs,
         )
         .await;
-        loader.stop();
         if let Ok(ms) = warm_result {
             state.warmed_fingerprint = Some(fingerprint);
-            println!(
-                "  {DIM}re-warming prompt cache (backend/model/tools changed) · {:.0}ms{RESET}",
-                ms
-            );
             if let Ok(trace) = state.trace.lock() {
                 let _ = trace.append(TracePayload::Warmup {
                     duration_ms: ms as u64,
@@ -702,7 +727,11 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 });
             }
         }
-    }
+        activity.update("Thinking".into());
+        activity
+    } else {
+        Loader::start("Thinking".into(), state.config.display.loader_style)
+    };
 
     let initial =
         request_messages_with_project_context(&state.messages, project_context.as_deref());
@@ -713,11 +742,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let http_clone = state.http.clone();
     let trace = state.trace.clone();
 
-    let loader = Loader::start(
-        state.config.display.loader_text.clone(),
-        state.config.display.loader_style,
-    );
-    let mut loader_opt = Some(loader);
+    let mut loader_opt = Some(model_activity);
 
     let cancel = CancellationToken::new();
     let cancel_for_agent = cancel.clone();
@@ -789,23 +814,27 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let mut memory_changed = false;
     let loader_style = state.config.display.loader_style;
     let renderer_manages_tool_activity = state.renderer.manages_tool_activity();
+    let reasoning_visible = state.renderer.reasoning_enabled();
     let drain_fut = async {
         while let Some(e) = rx.recv().await {
-            if let Some(l) = loader_opt.take() {
-                l.stop();
+            match model_activity_action(&e, reasoning_visible, renderer_manages_tool_activity) {
+                ModelActivityAction::Keep => {}
+                ModelActivityAction::Clear => {
+                    if let Some(activity) = loader_opt.take() {
+                        activity.stop();
+                    }
+                }
+                ModelActivityAction::Replace(text) => {
+                    if let Some(activity) = loader_opt.as_mut() {
+                        activity.update(text);
+                    } else {
+                        loader_opt = Some(Loader::start(text, loader_style));
+                    }
+                }
             }
-            let next_activity = match &e {
-                AgentEvent::ToolCall { name, .. } => {
-                    tool_calls.push(name.clone());
-                    None
-                }
-                AgentEvent::ToolExecutionStarted { name, .. }
-                    if !renderer_manages_tool_activity =>
-                {
-                    Some(format!("Running {name}…"))
-                }
-                _ => None,
-            };
+            if let AgentEvent::ToolCall { name, .. } = &e {
+                tool_calls.push(name.clone());
+            }
             if let AgentEvent::ToolResult { name, output, .. } = &e {
                 if tool_output_mutated_workspace(name, output) {
                     memory_changed = true;
@@ -822,12 +851,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 }
             }
             state.renderer.handle(e);
-            if let Some(text) = next_activity {
-                // Permanent transcript output owns the current line. Start the
-                // transient activity row only after that output has completed,
-                // so the two can never render side-by-side.
-                loader_opt = Some(Loader::start(text, loader_style));
-            }
         }
     };
 
@@ -1072,6 +1095,46 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    #[test]
+    fn model_activity_routes_transient_and_permanent_events_without_overlap() {
+        assert_eq!(
+            model_activity_action(&AgentEvent::ModelRequestStarted, false, true),
+            ModelActivityAction::Replace("Thinking".into())
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::Reasoning {
+                    delta: "private chain".into(),
+                },
+                false,
+                true,
+            ),
+            ModelActivityAction::Keep
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::Text {
+                    delta: "answer".into(),
+                },
+                false,
+                true,
+            ),
+            ModelActivityAction::Clear
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::ToolExecutionStarted {
+                    name: "shell".into(),
+                    call_id: "call-1".into(),
+                    depth: 0,
+                },
+                false,
+                false,
+            ),
+            ModelActivityAction::Replace("Running shell".into())
+        );
+    }
     use crate::app_state::AppState;
     use crate::approval::ApprovalCache;
     use crate::backends::{BackendDescriptor, BackendName};

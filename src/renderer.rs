@@ -692,6 +692,7 @@ impl TuiRenderer {
 
     pub fn handle(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::ModelRequestStarted => {}
             AgentEvent::Text { delta } => self.render_text(&delta),
             AgentEvent::ToolCall {
                 name,

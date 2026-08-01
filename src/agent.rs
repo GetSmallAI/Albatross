@@ -35,6 +35,10 @@ pub struct AgentHooks {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    /// A new provider request is beginning. This fires for the initial model
+    /// call and again after each tool round so the interactive UI can return
+    /// to one stable thinking state without guessing from tool receipts.
+    ModelRequestStarted,
     Text {
         delta: String,
     },
@@ -370,6 +374,7 @@ where
             break;
         }
         steps_taken += 1;
+        on_event(AgentEvent::ModelRequestStarted);
         let step_start = Instant::now();
         let req = ChatRequest {
             model,

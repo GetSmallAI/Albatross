@@ -782,8 +782,9 @@ async fn main() -> anyhow::Result<()> {
         let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
         let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
-        let loader = crate::loader::Loader::start("Warming up".into(), config.display.loader_style);
-        match warmup(
+        let activity =
+            crate::loader::Loader::start("Getting ready".into(), config.display.loader_style);
+        let warm_result = warmup(
             &http,
             &backend_desc,
             &model,
@@ -791,26 +792,16 @@ async fn main() -> anyhow::Result<()> {
             &warmup_prompt,
             &warmup_tool_defs,
         )
-        .await
-        {
-            Ok(ms) => {
-                warmed_fingerprint = Some(prompt_fingerprint(
-                    &backend_desc,
-                    &model,
-                    None,
-                    &warmup_prompt,
-                    &warmup_tool_names,
-                ));
-                loader.stop();
-                println!(
-                    "  {DIM}warmed up in {:.1}s — first prompt should be fast{RESET}",
-                    ms as f64 / 1000.0
-                );
-            }
-            Err(e) => {
-                loader.stop();
-                println!("  {DIM}warmup skipped: {e}{RESET}");
-            }
+        .await;
+        activity.stop();
+        if warm_result.is_ok() {
+            warmed_fingerprint = Some(prompt_fingerprint(
+                &backend_desc,
+                &model,
+                None,
+                &warmup_prompt,
+                &warmup_tool_names,
+            ));
         }
     }
 

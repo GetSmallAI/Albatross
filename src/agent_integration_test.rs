@@ -94,6 +94,7 @@ async fn read_and_explain_mock_loop() {
     let http = build_http_client();
     let mut tool_calls = Vec::new();
     let mut lifecycle = Vec::new();
+    let mut model_requests = 0usize;
 
     let run = run_agent(
         &http,
@@ -104,6 +105,10 @@ async fn read_and_explain_mock_loop() {
         tools,
         6,
         |event| match event {
+            AgentEvent::ModelRequestStarted => {
+                model_requests += 1;
+                lifecycle.push(format!("model-request:{model_requests}"));
+            }
             AgentEvent::ToolCall { name, call_id, .. } => {
                 tool_calls.push(name);
                 lifecycle.push(format!("announced:{call_id}"));
@@ -151,10 +156,12 @@ async fn read_and_explain_mock_loop() {
     assert_eq!(
         lifecycle,
         [
+            "model-request:1",
             "announced:call_1",
             "running:call_1",
             "execution-finished:call_1",
-            "receipt:call_1"
+            "receipt:call_1",
+            "model-request:2"
         ]
     );
     assert!(!run.hit_step_limit);
