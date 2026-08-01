@@ -64,7 +64,7 @@ use std::io::{IsTerminal, Read, Write};
 use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
 use crate::backends::{default_model, validate, BackendName};
-use crate::banner::{print_banner, BannerInfo};
+use crate::banner::print_session_header;
 use crate::commands::dispatch;
 use crate::config::load_config;
 use crate::hooks::{
@@ -750,11 +750,6 @@ async fn main() -> anyhow::Result<()> {
     let model = default_model(&backend_desc, config.model_override.as_deref());
 
     if config.display.show_banner {
-        print_banner(BannerInfo {
-            backend: config.backend.as_str(),
-            model: &model,
-            approval: config.approval_policy.as_str(),
-        });
         if let Some(notice) = crate::update_check::pending_notice(env!("CARGO_PKG_VERSION")) {
             println!("  {YELLOW}↑{RESET} {DIM}{notice}{RESET}");
         }
@@ -970,11 +965,14 @@ async fn main() -> anyhow::Result<()> {
         hook_context_messages(HookEventName::SessionStart, &start_outcome);
 
     loop {
-        // Header-only turn marker (a short fading rule), then a clean accent
-        // prompt. The same robust line reader is used regardless of the
-        // configured input style.
+        // Refresh the compact session context immediately above each prompt.
+        // In this transcript-style TUI, repeating a small header keeps live
+        // model, mode, approval, and Git state visible without a full-screen
+        // retained-mode renderer.
         println!();
-        println!("{}", crate::theme::fade_header("you"));
+        if state.config.display.show_banner {
+            print_session_header(&state.config, &state.model);
+        }
         let input = match plain_read_line_with_history_outcome(
             format!(
                 "{}{}{}{} ",

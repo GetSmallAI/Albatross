@@ -1,116 +1,246 @@
-use crate::theme::{colors_enabled, rule, ACCENT, ACCENT_DEEP, BOLD, FADE_RAMP, MUTED, PAD, RESET};
+use std::path::Path;
+use std::process::Command;
 
-#[cfg(test)]
-const LOGO_NAME: &str = "ALBATROSS";
-const LOGO: &str = r"   █████╗ ██╗     ██████╗  █████╗ ████████╗██████╗  ██████╗ ███████╗███████╗
-  ██╔══██╗██║     ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗██╔═══██╗██╔════╝██╔════╝
-  ███████║██║     ██████╔╝███████║   ██║   ██████╔╝██║   ██║███████╗███████╗
-  ██╔══██║██║     ██╔══██╗██╔══██║   ██║   ██╔══██╗██║   ██║╚════██║╚════██║
-  ██║  ██║███████╗██████╔╝██║  ██║   ██║   ██║  ██║╚██████╔╝███████║███████║
-  ╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝";
+use crate::theme::{fade_header_at_width, MUTED, PAD, RESET};
 
-pub struct BannerInfo<'a> {
-    pub model: &'a str,
-    pub backend: &'a str,
-    pub approval: &'a str,
+struct SessionHeaderInfo<'a> {
+    project: &'a str,
+    branch: Option<&'a str>,
+    dirty: bool,
+    backend: &'a str,
+    model: &'a str,
+    mode: &'a str,
+    approval: &'a str,
 }
 
-/// One `label  value` row with an aligned, readable label.
-fn row(label: &str, value: &str) -> String {
-    format!("{PAD}{MUTED}{label:<9}{RESET}{ACCENT}{value}{RESET}")
-}
-
-/// The logo, colored per-line across the cyan segment of the shared fade
-/// ramp (the ramp's gray tail is reserved for the trailing-off `fade_header`
-/// rule and would make the bottom logo rows illegible here). Falls back to
-/// the previous flat `ACCENT_DEEP` when colors are disabled.
-fn gradient_logo() -> String {
-    if !colors_enabled() {
-        return format!("{ACCENT_DEEP}{BOLD}{LOGO}{RESET}");
+fn truncate_to_width(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
     }
-    // Cyan-to-teal half of the ramp only (51 → 23); the gray tail (indices
-    // 9..=11) is deliberately excluded here.
-    const CYAN_SEGMENT_END: usize = 8;
-    let lines: Vec<&str> = LOGO.lines().collect();
-    let last = lines.len().saturating_sub(1).max(1);
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        let idx = (i * CYAN_SEGMENT_END) / last;
-        out.push_str(&format!(
-            "{BOLD}\x1b[38;5;{}m{line}{RESET}\n",
-            FADE_RAMP[idx]
-        ));
+    if max == 0 {
+        return String::new();
     }
-    out
+    let mut truncated = value
+        .chars()
+        .take(max.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
-pub fn print_banner(info: BannerInfo<'_>) {
-    println!();
-    print!("{}", gradient_logo());
-    println!();
-    println!(
-        "{PAD}{BOLD}Albatross v{}{RESET}  {MUTED}— a small, terminal-first coding harness{RESET}",
-        env!("CARGO_PKG_VERSION")
+fn render_session_header(info: SessionHeaderInfo<'_>, width: usize) -> String {
+    let mut workspace_parts = vec![info.project.to_string()];
+    if let Some(branch) = info.branch {
+        workspace_parts.push(branch.to_string());
+    }
+    if info.dirty {
+        workspace_parts.push("modified".to_string());
+    }
+    let workspace = workspace_parts.join(" · ");
+    let approval = match info.approval {
+        "dangerous-only" => "ask for risky actions",
+        "always" => "ask before actions",
+        "never" => "no approval prompts",
+        other => other,
+    };
+    let content_width = width.clamp(20, 400).saturating_sub(2);
+    let inner_width = content_width.saturating_sub(PAD.chars().count());
+    let header = fade_header_at_width("albatross", width);
+    let workspace = truncate_to_width(&workspace, inner_width);
+    let context = format!("{PAD}{MUTED}{workspace}{RESET}");
+
+    let details = format!(
+        "{} · {} · {} · {approval}",
+        info.backend, info.model, info.mode
     );
-    println!("{}", row("backend", info.backend));
-    println!("{}", row("model", info.model));
-    println!("{}", row("approval", info.approval));
-    println!("{}", rule());
+    if PAD.chars().count() + details.chars().count() <= content_width {
+        return format!("{header}\n{context}\n{PAD}{MUTED}{details}{RESET}");
+    }
+
+    let runtime = format!("{} · {}", info.backend, info.model);
+    let safety = format!("{} · {approval}", info.mode);
+    format!(
+        "{header}\n{context}\n{PAD}{MUTED}{}{RESET}\n{PAD}{MUTED}{}{RESET}",
+        truncate_to_width(&runtime, inner_width),
+        truncate_to_width(&safety, inner_width)
+    )
+}
+
+fn workspace_context(workspace_root: &str) -> (String, Option<String>, bool) {
+    let workspace = Path::new(workspace_root);
+    let display_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let project = display_workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(workspace_root)
+        .to_string();
+    let Ok(output) = Command::new("git")
+        .args(["-C", workspace_root, "status", "--porcelain=v2", "--branch"])
+        .output()
+    else {
+        return (project, None, false);
+    };
+    if !output.status.success() {
+        return (project, None, false);
+    }
+
+    let status = String::from_utf8_lossy(&output.stdout);
+    let branch = status.lines().find_map(|line| {
+        line.strip_prefix("# branch.head ")
+            .map(|name| name.to_string())
+    });
+    let dirty = status
+        .lines()
+        .any(|line| !line.is_empty() && !line.starts_with('#'));
+    (project, branch, dirty)
+}
+
+pub fn render_session_header_for(
+    config: &crate::config::AgentConfig,
+    model: &str,
+    width: usize,
+) -> String {
+    let (project, branch, dirty) = workspace_context(&config.workspace_root);
+    render_session_header(
+        SessionHeaderInfo {
+            project: &project,
+            branch: branch.as_deref(),
+            dirty,
+            backend: config.backend.as_str(),
+            model,
+            mode: config.mode.as_str(),
+            approval: config.approval_policy.as_str(),
+        },
+        width,
+    )
+}
+
+pub fn print_session_header(config: &crate::config::AgentConfig, model: &str) {
     println!(
-        "{PAD}{MUTED}/help{RESET} commands  {MUTED}·{RESET}  {MUTED}/backend /model{RESET} switch  {MUTED}·{RESET}  {MUTED}/exit{RESET} quit"
+        "{}",
+        render_session_header_for(config, model, crate::theme::cols())
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::process::Command;
 
-    // gradient_logo() reads a process-global color switch; serialize the two
-    // color-mode tests so they don't race with each other or with theme.rs's
-    // own switch-flipping test.
-    static COLOR_SWITCH_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_colors(enabled: bool, f: impl FnOnce()) {
-        let _guard = COLOR_SWITCH_TEST_LOCK.lock().unwrap();
-        crate::theme::init(
-            if enabled {
-                crate::config::ColorMode::Always
+    fn plain(value: &str) -> String {
+        let mut output = String::new();
+        let mut in_escape = false;
+        for ch in value.chars() {
+            if in_escape {
+                in_escape = ch != 'm';
+            } else if ch == '\x1b' {
+                in_escape = true;
             } else {
-                crate::config::ColorMode::Never
+                output.push(ch);
+            }
+        }
+        output
+    }
+
+    fn assert_header(line: &str, rule_width: usize) {
+        let rule = line.strip_prefix("  albatross ").unwrap();
+        assert_eq!(rule.chars().count(), rule_width);
+        assert!(rule.chars().all(|ch| ch == '─' || ch == '-'));
+    }
+
+    #[test]
+    fn session_header_shows_the_live_workspace_context() {
+        let rendered = plain(&render_session_header(
+            SessionHeaderInfo {
+                project: "Albatross",
+                branch: Some("main"),
+                dirty: true,
+                backend: "grok",
+                model: "grok-build-0.1",
+                mode: "edit",
+                approval: "dangerous-only",
             },
-            false,
+            120,
+        ));
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 3);
+        assert_header(lines[0], 24);
+        assert_eq!(lines[1], "  Albatross · main · modified");
+        assert_eq!(
+            lines[2],
+            "  grok · grok-build-0.1 · edit · ask for risky actions"
         );
-        f();
-        crate::theme::init(crate::config::ColorMode::Always, false);
     }
 
     #[test]
-    fn gradient_logo_has_no_escapes_when_colors_disabled() {
-        with_colors(false, || {
-            let logo = gradient_logo();
-            assert!(!logo.contains('\x1b'));
-            assert!(logo.contains("███████╗")); // still the same art, just uncolored
-            assert_eq!(LOGO_NAME, "ALBATROSS");
-        });
+    fn session_header_reflows_on_narrow_terminals() {
+        let rendered = plain(&render_session_header(
+            SessionHeaderInfo {
+                project: "Albatross",
+                branch: Some("feature/polished-ui"),
+                dirty: false,
+                backend: "openai-codex",
+                model: "gpt-5.2-codex",
+                mode: "review",
+                approval: "dangerous-only",
+            },
+            40,
+        ));
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 4);
+        assert_header(lines[0], 8);
+        assert_eq!(lines[1], "  Albatross · feature/polished-ui");
+        assert_eq!(lines[2], "  openai-codex · gpt-5.2-codex");
+        assert_eq!(lines[3], "  review · ask for risky actions");
+        assert!(lines.iter().all(|line| line.chars().count() <= 40));
     }
 
     #[test]
-    fn albatross_wordmark_has_uniform_rows() {
-        let widths = LOGO
-            .lines()
-            .map(|line| line.chars().count())
-            .collect::<Vec<_>>();
-        assert_eq!(widths.len(), 6);
-        assert!(widths.windows(2).all(|pair| pair[0] == pair[1]));
+    fn session_header_derives_the_project_and_git_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("Albatross");
+        std::fs::create_dir(&workspace).unwrap();
+        let output = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        std::fs::write(workspace.join("new.rs"), "fn main() {}\n").unwrap();
+
+        let mut config = crate::config::AgentConfig::default();
+        config.workspace_root = workspace.display().to_string();
+        config.backend = crate::backends::BackendName::Grok;
+        config.mode = crate::config::OperatorMode::Edit;
+        config.approval_policy = crate::config::ApprovalPolicy::DangerousOnly;
+
+        let rendered = plain(&render_session_header_for(&config, "grok-build-0.1", 120));
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_header(lines[0], 24);
+        assert_eq!(lines[1], "  Albatross · main · modified");
+        assert_eq!(
+            lines[2],
+            "  grok · grok-build-0.1 · edit · ask for risky actions"
+        );
     }
 
     #[test]
-    fn gradient_logo_colors_every_line_when_enabled() {
-        with_colors(true, || {
-            let logo = gradient_logo();
-            let line_count = LOGO.lines().count();
-            assert_eq!(logo.matches("\x1b[38;5;").count(), line_count);
-        });
+    fn workspace_context_resolves_a_relative_root_to_its_project_name() {
+        let expected = std::env::current_dir()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let (project, _, _) = workspace_context(".");
+
+        assert_eq!(project, expected);
+        assert_ne!(project, ".");
     }
 }

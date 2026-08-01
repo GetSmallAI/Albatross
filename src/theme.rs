@@ -191,7 +191,16 @@ pub(crate) const FADE_RAMP: [u8; 12] = [51, 45, 39, 38, 37, 31, 30, 24, 23, 237,
 /// done per-character with 256-color codes so it reads as a soft taper rather
 /// than a hard-edged bar. No bottom or side borders — just this top accent.
 pub fn fade_header(label: &str) -> String {
-    let len = (cols() / 5).clamp(6, 30);
+    fade_header_at_width(label, cols())
+}
+
+/// Render a fading turn header for a known terminal width.
+///
+/// Most call sites should use [`fade_header`]. Components that already receive
+/// a measured width use this variant so their layout and the shared turn-header
+/// treatment are calculated from the same value.
+pub(crate) fn fade_header_at_width(label: &str, width: usize) -> String {
+    let len = (width / 5).clamp(6, 30);
     if !colors_enabled() {
         return format!("{PAD}{label} {}", rule_char().repeat(len));
     }
