@@ -700,6 +700,10 @@ const SYSTEM_PROMPT: &str = concat!(
     "- For greetings, casual chat, or questions you can answer from general knowledge, respond in plain text. Do NOT call a tool.\n",
     "- Only call a tool when the user's request actually needs filesystem access.\n",
     "- When you do call a tool, emit a real tool call — not a JSON description in your text response.\n",
+    "- Tool results are already visible in the transcript. Do not repeat shell\n",
+    "  output, file contents, search matches, test logs, or diffs verbatim unless\n",
+    "  the user explicitly asks to see them. State the conclusion or action\n",
+    "  instead; when asked to briefly confirm, use one sentence.\n",
     "\n",
     "When the user asks you to create or change code or files:\n",
     "- DO write the changes to disk with the file tools: file_write to create a\n",
@@ -1424,6 +1428,15 @@ pub fn load_config() -> AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_prompt_prevents_echoing_visible_tool_evidence() {
+        let prompt = AgentConfig::default().render_system_prompt();
+
+        assert!(prompt.contains("Tool results are already visible in the transcript"));
+        assert!(prompt.contains("Do not repeat shell"));
+        assert!(prompt.contains("when asked to briefly confirm, use one sentence"));
+    }
 
     #[test]
     fn workspace_migration_preserves_hand_written_files() {
