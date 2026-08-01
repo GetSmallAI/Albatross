@@ -107,6 +107,7 @@ pub const SUB: Sym = Sym("↳", ">");
 pub const WARN_MARK: Sym = Sym("▲", "!");
 pub const BULLET: Sym = Sym("•", "*");
 pub const PROMPT_CHAR: Sym = Sym("❯", ">");
+pub const CODE_GUTTER: Sym = Sym("│", "|");
 pub const BRANCH_MID: Sym = Sym("├", "+");
 pub const BRANCH_END: Sym = Sym("└", "`");
 pub const BOLT: Sym = Sym("⚡", "*");
@@ -307,22 +308,6 @@ fn styled_notice_rows(
 pub fn rule() -> String {
     let dashes = cols().saturating_sub(PAD.len());
     format!("{PAD}{MUTED}{}{RESET}", rule_char().repeat(dashes))
-}
-
-/// A dim rule that frames a fenced code block. With a language it reads
-/// `── rust ─────`; the closing rule (empty language) is just dashes. No
-/// leading `PAD` — the renderer positions it directly under the answer gutter.
-pub fn code_fence_rule(lang: &str) -> String {
-    let target = content_width().min(48);
-    let rc = rule_char();
-    let lang = lang.trim();
-    if lang.is_empty() {
-        format!("{MUTED}{}{RESET}", rc.repeat(target))
-    } else {
-        let label = format!("{rc}{rc} {lang} ");
-        let remain = target.saturating_sub(visible_len(&label));
-        format!("{MUTED}{label}{}{RESET}", rc.repeat(remain))
-    }
 }
 
 /// 256-color ramp used by the fading turn headers (and the banner logo):

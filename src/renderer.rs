@@ -10,8 +10,8 @@ use crate::input::ComposerDetails;
 use crate::markdown::{MarkdownInline, MdEvent};
 
 use crate::theme::{
-    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, BRANCH_MID, CHECK, DOT,
-    FAIL, HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, BRANCH_MID, CHECK,
+    CODE_GUTTER, DOT, FAIL, HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
 };
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
@@ -217,10 +217,22 @@ impl StreamWrap {
         self.verbatim = on;
         self.col = 0;
         self.indent = 0;
-        self.at_line_start = true;
+        self.at_line_start = !on;
         self.need_space = false;
         self.in_escape = false;
         out
+    }
+
+    fn set_gutter(&mut self, gutter: impl Into<String>) {
+        self.gutter = gutter.into();
+    }
+
+    fn mark_line_started(&mut self) {
+        self.at_line_start = false;
+    }
+
+    fn is_at_line_start(&self) -> bool {
+        self.at_line_start
     }
 
     fn line_break(&mut self, out: &mut String, hard: bool) {
@@ -295,12 +307,21 @@ impl StreamWrap {
     fn feed(&mut self, s: &str) -> String {
         let mut out = String::new();
         if self.verbatim {
-            // No wrapping, no word buffering: emit as-is, but re-indent each
-            // physical line with the gutter so code stays under the panel.
+            // No wrapping or word buffering. Delay each gutter until the next
+            // character arrives so a trailing newline never leaves a dangling
+            // gutter before the closing fence event.
             for ch in s.chars() {
-                out.push(ch);
                 if ch == '\n' {
-                    out.push_str(&self.gutter);
+                    out.push(ch);
+                    self.col = 0;
+                    self.at_line_start = true;
+                } else {
+                    if self.at_line_start {
+                        out.push_str(&self.gutter);
+                        self.at_line_start = false;
+                    }
+                    out.push(ch);
+                    self.col += 1;
                 }
             }
             return out;
@@ -918,7 +939,7 @@ pub struct TuiRenderer {
 }
 
 /// Route one markdown event to the answer wrapper: styled text flows through
-/// the wrapper; fence signals flip verbatim mode and print framing rules. Kept
+/// the wrapper; fence signals flip verbatim mode and print a quiet gutter. Kept
 /// free-standing so it can borrow the wrapper without the whole renderer.
 fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
     match ev {
@@ -927,18 +948,25 @@ fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
             let _ = write!(out, "{chunk}");
         }
         MdEvent::CodeStart { lang } => {
-            // A newline+gutter always precedes a fence, so the rule (which has
-            // no leading PAD) lands correctly under the answer gutter.
             let flushed = wrap.set_verbatim(true);
             let _ = write!(out, "{flushed}");
-            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(&lang));
-            let _ = write!(out, "{PAD}");
+            let gutter = format!("{PAD}{GRAY}{CODE_GUTTER}{RESET}{TEXT} ");
+            wrap.set_gutter(gutter.clone());
+            if lang.is_empty() {
+                let _ = write!(out, "{GRAY}{CODE_GUTTER}{RESET}{TEXT} ");
+            } else {
+                let _ = writeln!(out, "{GRAY}{}{RESET}", lang.trim());
+                let _ = write!(out, "{gutter}");
+            }
+            wrap.mark_line_started();
         }
         MdEvent::CodeEnd => {
+            let at_line_start = wrap.is_at_line_start();
             let flushed = wrap.set_verbatim(false);
+            wrap.set_gutter(PAD);
             let _ = write!(out, "{flushed}");
-            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(""));
-            let _ = write!(out, "{PAD}{TEXT}");
+            let spacing = if at_line_start { "\n" } else { "\n\n" };
+            let _ = write!(out, "{spacing}{PAD}{TEXT}");
         }
     }
 }
@@ -1459,7 +1487,9 @@ impl TuiRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamWrap;
+    use super::{write_md_event, StreamWrap};
+    use crate::markdown::MarkdownInline;
+    use std::io::Write;
 
     /// Feed `text` through the wrapper one char at a time (worst case for an
     /// incremental wrapper) and return the visible lines, gutter stripped.
@@ -1634,6 +1664,32 @@ mod tests {
         }
         // Styling actually happened.
         assert!(out.contains("\x1b[1m"));
+    }
+
+    #[test]
+    fn fenced_code_uses_a_compact_gutter_without_frame_rules() {
+        crate::theme::init(crate::config::ColorMode::Never, false);
+        let input = "Before\n\n```rust\nalpha\nbeta\n```\nAfter";
+        let mut md = MarkdownInline::new();
+        let mut wrap = StreamWrap::new(80, crate::theme::PAD);
+        let mut output = Vec::new();
+        write!(output, "{}", crate::theme::PAD).unwrap();
+        for ch in input.chars() {
+            for event in md.feed(&ch.to_string()) {
+                write_md_event(&mut output, &mut wrap, event);
+            }
+        }
+        for event in md.finish() {
+            write_md_event(&mut output, &mut wrap, event);
+        }
+        write!(output, "{}", wrap.finish()).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("  rust\n  │ alpha\n  │ beta"), "{output:?}");
+        assert!(output.contains("  │ beta\n\n  After"), "{output:?}");
+        assert!(!output.contains("```"));
+        assert!(!output.contains("────"));
+        crate::theme::init(crate::config::ColorMode::Always, false);
     }
 
     #[test]
