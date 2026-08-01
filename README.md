@@ -502,10 +502,13 @@ data in an arrow-key menu. It tags the live session choice `(selected)` and the
 value persisted in `agent.config.json` `(default)`:
 
 ```text
+  Model
+
   ▸ 1) gpt-4o-mini  (selected) (default)   128k ctx · $0.15/$0.60 per Mtoken
     2) gpt-4o                               128k ctx · $2.50/$10.00 per Mtoken
     3) o1-mini                              128k ctx · $3.00/$12.00 per Mtoken
     4) type a model id…
+
   ↑/↓ move · Enter select · 1-9 jump · q cancel
 ```
 

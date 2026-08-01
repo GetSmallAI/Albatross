@@ -1258,6 +1258,12 @@ fn render_select_menu(title: &str, options: &[String], selected: usize) -> (Stri
     s.push_str(&format!("{PAD}{BOLD}{title}{RESET}\r\n"));
     rows += 1;
 
+    // Give the heading and keyboard help their own visual rhythm. The picker
+    // is a decision surface, not a compact log, so a little whitespace makes
+    // the active option easier to scan without changing the interaction.
+    s.push_str("\r\n");
+    rows += 1;
+
     let start = if n <= SELECT_MAX_ROWS || selected < SELECT_MAX_ROWS {
         0
     } else {
@@ -1292,6 +1298,9 @@ fn render_select_menu(title: &str, options: &[String], selected: usize) -> (Stri
         ));
         rows += 1;
     }
+
+    s.push_str("\r\n");
+    rows += 1;
 
     s.push_str(&format!(
         "{PAD}{MUTED}↑/↓ move · Enter select · 1-9 jump · q cancel{RESET}"
@@ -1580,7 +1589,7 @@ mod tests {
     fn select_menu_highlights_selected_row_and_counts_lines() {
         let options = vec!["ollama".into(), "openai *".into(), "openrouter".into()];
         let (frame, rows) = render_select_menu("Backend", &options, 1);
-        assert_eq!(rows, 5, "title + 3 options + hint");
+        assert_eq!(rows, 7, "title + gap + 3 options + gap + hint");
         assert!(frame.contains("Backend"), "title missing: {frame:?}");
         assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
         // Title and rows share the left gutter (PAD). The interactive loop also
@@ -1589,10 +1598,18 @@ mod tests {
             frame.starts_with(PAD),
             "title must start at the left gutter: {frame:?}"
         );
-        let first_option = frame.lines().nth(1).expect("first option");
+        let first_option = frame.lines().nth(2).expect("first option");
         assert!(
             first_option.starts_with(PAD),
             "options must share the title gutter: {first_option:?}"
+        );
+        assert!(
+            frame.lines().nth(1).is_some_and(str::is_empty),
+            "heading should be separated from its options: {frame:?}"
+        );
+        assert!(
+            frame.lines().nth(5).is_some_and(str::is_empty),
+            "options should be separated from keyboard help: {frame:?}"
         );
         // Selected row keeps number+label contiguous (bold). Unselected rows
         // insert a RESET between the muted number and the label.
@@ -1687,7 +1704,7 @@ mod tests {
     fn select_menu_clamps_selected_index() {
         let options = vec!["a".into(), "b".into()];
         let (frame, rows) = render_select_menu("Pick", &options, 99);
-        assert_eq!(rows, 4, "title + 2 options + hint");
+        assert_eq!(rows, 6, "title + gap + 2 options + gap + hint");
         // Out-of-range selection clamps to last item (index 1 → "2) b").
         let pointer = frame.find('▸').expect("pointer");
         let b_pos = frame.find("2) b").expect("b row");
@@ -1702,8 +1719,8 @@ mod tests {
     fn select_menu_scrolls_long_lists() {
         let options: Vec<String> = (1..=20).map(|i| format!("model-{i:02}")).collect();
         let (frame, rows) = render_select_menu("Model", &options, 15);
-        // title + "… above" + 12 options + "… more" + hint
-        assert_eq!(rows, 16, "windowed frame height: {frame:?}");
+        // title + gap + "… above" + 12 options + "… more" + gap + hint
+        assert_eq!(rows, 18, "windowed frame height: {frame:?}");
         assert!(
             frame.contains("… 4 above"),
             "top overflow missing: {frame:?}"
