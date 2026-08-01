@@ -20,6 +20,7 @@ mod config;
 mod context_guard;
 mod continuation;
 mod crash_log;
+mod cursor;
 mod diff_view;
 mod dir_migration;
 mod fable_usage;
@@ -711,6 +712,7 @@ async fn main() -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
+    let _cursor_session = crate::cursor::CursorGuard::interactive_session()?;
     let setup_base = load_config();
     crate::theme::init(setup_base.display.color, setup_base.display.ascii);
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
@@ -741,6 +743,7 @@ async fn main() -> anyhow::Result<()> {
             );
         } else {
             eprintln!("{e}");
+            crate::cursor::restore();
             std::process::exit(1);
         }
     }

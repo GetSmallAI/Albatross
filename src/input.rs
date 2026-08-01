@@ -105,7 +105,10 @@ pub async fn plain_read_line_with_history(
     match plain_read_line_with_history_outcome(prompt, history, commands).await? {
         ReadLineOutcome::Line(line) => Ok(line),
         ReadLineOutcome::Eof => Err(anyhow!("input closed")),
-        ReadLineOutcome::Interrupted => std::process::exit(0),
+        ReadLineOutcome::Interrupted => {
+            crate::cursor::restore();
+            std::process::exit(0)
+        }
     }
 }
 
@@ -289,6 +292,7 @@ fn read_plain_outcome(
     let mut out = std::io::stdout();
     write!(out, "{prompt}")?;
     out.flush()?;
+    let _cursor = crate::cursor::CursorGuard::text_input()?;
     crossterm::terminal::enable_raw_mode()?;
     let prompt_cols = crate::theme::visible_len(prompt);
     let term_cols = crossterm::terminal::size()
@@ -501,7 +505,10 @@ pub async fn select_from_list(
     match outcome {
         SelectOutcome::Selected(i) => Ok(Some(i)),
         SelectOutcome::Cancelled => Ok(None),
-        SelectOutcome::Interrupted => std::process::exit(0),
+        SelectOutcome::Interrupted => {
+            crate::cursor::restore();
+            std::process::exit(0)
+        }
         SelectOutcome::Eof => Err(anyhow!("input closed")),
     }
 }
@@ -583,6 +590,7 @@ fn read_select_outcome(
     let mut selected = default_idx.min(n - 1);
     let mut out = std::io::stdout();
 
+    crate::cursor::set_state(crate::cursor::CursorState::Passive)?;
     crossterm::terminal::enable_raw_mode()?;
     let result = (|| -> Result<SelectOutcome> {
         let mut first = true;

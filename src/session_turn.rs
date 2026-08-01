@@ -733,6 +733,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 cancel_for_signal.cancel();
                 eprintln!("\n  cancelling current turn… press Ctrl-C again to exit");
             } else {
+                crate::cursor::restore();
                 std::process::exit(130);
             }
         }
