@@ -72,7 +72,7 @@ use crate::hooks::{
     load_hook_state_file_from, render_hook_context_block, HookEventName, HookInvocationContext,
     HookNotice, HookNoticeLevel, HookRegistry, HookTrustStatus,
 };
-use crate::input::{plain_read_line_with_history_outcome, InputHistory, ReadLineOutcome};
+use crate::input::{read_composer_with_history_outcome, InputHistory, ReadLineOutcome};
 use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, load_session_metadata, new_session_path};
@@ -973,14 +973,7 @@ async fn main() -> anyhow::Result<()> {
         if state.config.display.show_banner {
             print_session_header(&state.config, &state.model);
         }
-        let input = match plain_read_line_with_history_outcome(
-            format!(
-                "{}{}{}{} ",
-                crate::theme::PAD,
-                crate::theme::ACCENT,
-                crate::theme::PROMPT_CHAR,
-                RESET
-            ),
+        let input = match read_composer_with_history_outcome(
             input_history.entries().to_vec(),
             command_names.clone(),
         )
