@@ -40,6 +40,9 @@ few that aren't usual:
 - **Compact turn receipts.** Tokens, steps, total time, and model stay on one
   primary row. Known cost and other optional context move to indented rows so
   they never overwhelm the response.
+- **Calm failure states.** Warnings and errors lead with a readable summary,
+  then put the recovery action on its own indented row. Cancelling a turn emits
+  one warning, leaves conversation state unchanged, and returns to the composer.
 - **OpenRouter Fusion, one command away.** `/fusion on` switches to the
   `openrouter/fusion` alias for deliberative work; `/fusion tool` attaches
   Fusion to a chosen OpenRouter coding model for hard reviews, architecture

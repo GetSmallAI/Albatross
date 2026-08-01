@@ -32,6 +32,7 @@ use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
     format_test_failure_feedback, run_selected_tests, smart_test_selection, TestResult,
 };
+use crate::theme::{notice, NoticeKind};
 use crate::tools::{
     build_tools_for_names, select_tool_names, tool_output_mutated_workspace, ToolPreview,
     ToolRuntimeContext,
@@ -42,9 +43,7 @@ use crate::warmup::warmup;
 
 const RESET: crate::theme::Style = crate::theme::RESET;
 const DIM: crate::theme::Style = crate::theme::MUTED;
-const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const YELLOW: crate::theme::Style = crate::theme::WARN;
-const RED: crate::theme::Style = crate::theme::ERROR;
 const GRAY: crate::theme::Style = crate::theme::MUTED;
 
 pub struct TurnOptions {
@@ -825,7 +824,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             hits += 1;
             if hits == 1 {
                 cancel_for_signal.cancel();
-                eprintln!("\n  cancelling current turn… press Ctrl-C again to exit");
             } else {
                 crate::cursor::restore();
                 std::process::exit(130);
@@ -926,11 +924,24 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let before = state.messages.len();
     let (result, _) = tokio::join!(agent_fut, drain_fut);
     ctrl_task.abort();
+    let was_cancelled = cancel.is_cancelled();
 
     if let Some(l) = loader_opt.take() {
         l.stop();
     }
     state.renderer.end_turn();
+
+    if was_cancelled {
+        println!(
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                "Turn cancelled",
+                Some("Your conversation is unchanged. Press Ctrl-C again at the composer to exit."),
+            )
+        );
+        return Err(crate::cancel::cancelled_error());
+    }
 
     let mut res = result?;
     if project_context.is_some() {
@@ -958,7 +969,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         if let Err(e) =
             rewrite_session_transcript(&state.session_dir, &mut state.session_path, &state.messages)
         {
-            println!("  {RED}✗{RESET} {DIM}session rewrite failed: {e}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Error,
+                    "Session transcript could not be saved",
+                    Some(&e.to_string()),
+                )
+            );
         }
         let _ = state.reset_trace_for_session();
     } else {
@@ -992,7 +1010,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         enabled: state.config.scorecard.enabled,
     }) {
         if state.renderer.verbose_enabled() {
-            println!("  {YELLOW}!{RESET} {DIM}scorecard turn not recorded: {e}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Scorecard turn was not recorded",
+                    Some(&e.to_string()),
+                )
+            );
         }
     }
     let catalog_cost = turn_cost_usd(
@@ -1048,7 +1073,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     });
     if let Err(error) = append_event(&state.config.workspace_root, &receipt) {
         if state.renderer.verbose_enabled() {
-            println!("  {YELLOW}!{RESET} {DIM}route receipt not recorded: {error}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Route receipt was not recorded",
+                    Some(&error.to_string()),
+                )
+            );
         }
     }
 
@@ -1063,7 +1095,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 let files = checkpoint.file_count();
                 state.checkpoint_stack.push(checkpoint);
                 checkpoint_pushed = true;
-                println!("  {DIM}checkpoint saved ({files} file(s)) — /undo to revert{RESET}");
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Info,
+                        &format!("Checkpoint saved · {files} file(s)"),
+                        Some("Run /undo to revert this turn."),
+                    )
+                );
             }
         }
         match refresh_project_memory_after_write(&state.config) {
@@ -1073,7 +1112,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             ),
             Ok(None) => {}
             Err(e) => {
-                println!("  {YELLOW}!{RESET} {DIM}project memory refresh skipped: {e}{RESET}")
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Project memory refresh skipped",
+                        Some(&e.to_string()),
+                    )
+                )
             }
         }
         if opts.auto_verify_tests && state.config.mode == OperatorMode::Ship {
@@ -1091,19 +1137,37 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                                 state.messages.push(verify_msg.clone());
                                 let _ = save_message(&state.session_path, &verify_msg);
                                 println!(
-                                    "  {YELLOW}tests:{RESET} {} failed (see context)",
-                                    result.failed
+                                    "{}",
+                                    notice(
+                                        NoticeKind::Warning,
+                                        &format!("{} test(s) failed", result.failed),
+                                        Some("Failure details were added to the model context."),
+                                    )
                                 );
                             } else if let Ok(snapshot) =
                                 collect_shipcheck(&state.config.workspace_root)
                             {
                                 if snapshot.ready_to_ship() {
-                                    println!("  {GREEN}✓{RESET} {DIM}ready for /handoff{RESET}");
+                                    println!(
+                                        "{}",
+                                        notice(
+                                            NoticeKind::Success,
+                                            "Ready for handoff",
+                                            Some("Run /handoff when you are ready."),
+                                        )
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                            println!("  {YELLOW}!{RESET} {DIM}auto-verify skipped: {e}{RESET}")
+                            println!(
+                                "{}",
+                                notice(
+                                    NoticeKind::Warning,
+                                    "Automatic verification skipped",
+                                    Some(&e.to_string()),
+                                )
+                            )
                         }
                     }
                 }

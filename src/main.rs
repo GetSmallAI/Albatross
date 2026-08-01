@@ -81,15 +81,13 @@ use crate::session_turn::{
     dispatch_app_hook, run_user_turn, system_prompt_with_hook_context,
     updated_prompt_from_hook_input, TurnOptions,
 };
+use crate::theme::{notice, NoticeKind};
 use crate::tools::{build_tools_for_names, select_tool_names};
 use crate::turn_checkpoint::CheckpointStack;
 use crate::warmup::warmup;
 
 const RESET: crate::theme::Style = crate::theme::RESET;
 const DIM: crate::theme::Style = crate::theme::MUTED;
-const GREEN: crate::theme::Style = crate::theme::SUCCESS;
-const YELLOW: crate::theme::Style = crate::theme::WARN;
-const RED: crate::theme::Style = crate::theme::ERROR;
 
 struct CliOneShot {
     prompt: String,
@@ -184,7 +182,12 @@ fn write_hook_review_notice(out: &mut impl Write, hooks: &HookRegistry) {
     if review_needed > 0 {
         let _ = writeln!(
             out,
-            "  {YELLOW}!{RESET} {DIM}{review_needed} hook(s) need review and will be skipped. Run /hooks to inspect or trust them.{RESET}"
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                &format!("{review_needed} hook(s) skipped pending review"),
+                Some("Run /hooks to inspect or trust them."),
+            )
         );
     }
     let invalid = hooks
@@ -195,7 +198,12 @@ fn write_hook_review_notice(out: &mut impl Write, hooks: &HookRegistry) {
     if invalid > 0 {
         let _ = writeln!(
             out,
-            "  {YELLOW}!{RESET} {DIM}{invalid} hook(s) have invalid matchers and will be skipped. Run /hooks to inspect them.{RESET}"
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                &format!("{invalid} hook(s) skipped because their matchers are invalid"),
+                Some("Run /hooks to inspect them."),
+            )
         );
     }
 }
@@ -605,7 +613,14 @@ fn load_runtime_hooks(
         crate::hooks::load_managed_hooks_from_env(managed_env.as_deref(), managed_file.as_deref())?;
     let hook_state = match hook_state_file_path() {
         Some(path) => load_hook_state_file_from(&path).unwrap_or_else(|e| {
-            eprintln!("  {YELLOW}!{RESET} {DIM}hook trust state ignored: {e}{RESET}");
+            eprintln!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Hook trust state ignored",
+                    Some(&e.to_string()),
+                )
+            );
             crate::hooks::HookStateFile::default()
         }),
         None => crate::hooks::HookStateFile::default(),
@@ -737,12 +752,23 @@ async fn main() -> anyhow::Result<()> {
                 BackendName::Grok => "/login grok",
                 _ => "/login openai-codex",
             };
-            println!("  {YELLOW}!{RESET} {DIM}{e}{RESET}");
             println!(
-                "  {DIM}Starting anyway so you can run {login_cmd}, or /backend to switch.{RESET}"
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Backend login required",
+                    Some(&format!("{e} Run {login_cmd}, or /backend to switch.")),
+                )
             );
         } else {
-            eprintln!("{e}");
+            eprintln!(
+                "{}",
+                notice(
+                    NoticeKind::Error,
+                    "Backend configuration failed",
+                    Some(&e.to_string())
+                )
+            );
             crate::cursor::restore();
             std::process::exit(1);
         }
@@ -751,7 +777,7 @@ async fn main() -> anyhow::Result<()> {
 
     if config.display.show_banner {
         if let Some(notice) = crate::update_check::pending_notice(env!("CARGO_PKG_VERSION")) {
-            println!("  {YELLOW}↑{RESET} {DIM}{notice}{RESET}");
+            println!("{}", crate::theme::notice(NoticeKind::Info, &notice, None));
         }
     }
 
@@ -775,8 +801,16 @@ async fn main() -> anyhow::Result<()> {
         probe_backend(&http, &backend_desc).await
     };
     if let Err(hint) = probe {
-        println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {hint}{RESET}");
-        println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
+        println!(
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                "Backend not reachable",
+                Some(&format!(
+                    "{hint} Use /backend to switch, or fix the connection and retry."
+                )),
+            )
+        );
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
         let warmup_tool_names = select_tool_names(&config, "");
         let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);
@@ -870,7 +904,12 @@ async fn main() -> anyhow::Result<()> {
             .count();
         if pending > 0 {
             println!(
-                "  {YELLOW}!{RESET} {DIM}MCP: {pending} new or modified server(s) skipped; review with /mcp{RESET}"
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    &format!("{pending} MCP server(s) skipped pending review"),
+                    Some("Run /mcp to inspect them."),
+                )
             );
         }
         let (tools, errors) = crate::mcp::spawn_configured(&trusted).await;
@@ -882,7 +921,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         for err in &errors {
-            println!("  {YELLOW}!{RESET} {DIM}MCP: {err}{RESET}");
+            println!(
+                "{}",
+                notice(NoticeKind::Warning, "MCP server unavailable", Some(err))
+            );
         }
         state.mcp_tools = tools;
     }
@@ -911,7 +953,12 @@ async fn main() -> anyhow::Result<()> {
                         apply_path_session_state(&mut state, &path_state, &transcript);
                         if report.is_partial() {
                             println!(
-                                "{YELLOW}!{RESET} {DIM}--continue path restore partial{RESET}"
+                                "{}",
+                                notice(
+                                    NoticeKind::Warning,
+                                    "Session path restored partially",
+                                    Some("Some workspace state could not be restored."),
+                                )
                             );
                         }
                     }
@@ -925,19 +972,39 @@ async fn main() -> anyhow::Result<()> {
                         String::new()
                     };
                     println!(
-                        "{GREEN}{}{RESET} {DIM}continuing{RESET} {} {DIM}({} messages{path_note}){RESET}",
-                        crate::theme::OK,
-                        id,
-                        state.messages.len()
+                        "{}",
+                        notice(
+                            NoticeKind::Success,
+                            &format!("Continuing {id}"),
+                            Some(&format!("{} messages{path_note}", state.messages.len())),
+                        )
                     );
                 }
-                Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+                Err(e) => println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Could not continue session",
+                        Some(&e.to_string())
+                    )
+                ),
             },
             Ok(None) => println!(
-                "{YELLOW}!{RESET} {DIM}--continue: no prior session found in {}{RESET}",
-                state.session_dir
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "No prior session found",
+                    Some(&state.session_dir),
+                )
             ),
-            Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+            Err(e) => println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Could not resolve prior session",
+                    Some(&e.to_string())
+                )
+            ),
         }
     }
 
@@ -991,7 +1058,10 @@ async fn main() -> anyhow::Result<()> {
 
         if state.config.slash_commands && trimmed.starts_with('/') {
             if let Err(e) = dispatch(trimmed, &mut state).await {
-                println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
+                println!(
+                    "{}",
+                    notice(NoticeKind::Error, "Command failed", Some(&e.to_string()))
+                );
             }
             continue;
         }
@@ -1002,7 +1072,14 @@ async fn main() -> anyhow::Result<()> {
             && load_project_index(&state.config).ok().flatten().is_none()
         {
             if let Err(e) = build_project_index(&state.config) {
-                println!("  {YELLOW}!{RESET} {DIM}project memory auto-index skipped: {e}{RESET}");
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Project memory refresh skipped",
+                        Some(&e.to_string()),
+                    )
+                );
             }
         }
 
@@ -1018,7 +1095,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         {
-            println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
+            if !crate::cancel::is_cancelled_error(&e) {
+                println!(
+                    "{}",
+                    notice(NoticeKind::Error, "Turn failed", Some(&e.to_string()))
+                );
+            }
         }
     }
 }

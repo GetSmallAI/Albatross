@@ -112,6 +112,27 @@ pub const BOLT: Sym = Sym("⚡", "*");
 pub const BANG: Sym = Sym("!", "!");
 pub const HOOK_STOP: Sym = Sym("■", "!");
 
+/// Semantic tone for a transcript notice. Callers describe meaning; the theme
+/// owns symbols, color, spacing, and recovery-hint hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl NoticeKind {
+    fn treatment(self) -> (Style, Sym) {
+        match self {
+            Self::Info => (ACCENT, POINT),
+            Self::Success => (SUCCESS, OK),
+            Self::Warning => (WARN, WARN_MARK),
+            Self::Error => (ERROR, FAIL),
+        }
+    }
+}
+
 fn rule_char() -> &'static str {
     if ascii_enabled() {
         "-"
@@ -192,6 +213,93 @@ pub fn truncate_visible(value: &str, max: usize) -> String {
     output.push('…');
     output.push_str(&RESET.to_string());
     output
+}
+
+/// Render a compact transcript notice with an optional recovery hint.
+pub fn notice(kind: NoticeKind, summary: &str, hint: Option<&str>) -> String {
+    notice_at_width(kind, summary, hint, cols())
+}
+
+pub(crate) fn notice_at_width(
+    kind: NoticeKind,
+    summary: &str,
+    hint: Option<&str>,
+    width: usize,
+) -> String {
+    let (color, marker) = kind.treatment();
+    let width = width.max(20);
+    let summary_prefix = format!("{PAD}{color}{marker}{RESET} ");
+    let summary_continuation = "    ";
+    let mut rows = styled_notice_rows(
+        summary.trim(),
+        &summary_prefix,
+        summary_continuation,
+        BOLD,
+        width,
+    );
+    if let Some(hint) = hint.map(str::trim).filter(|hint| !hint.is_empty()) {
+        let hint_prefix = format!("    {MUTED}{BRANCH_END} ");
+        rows.extend(styled_notice_rows(
+            hint,
+            &hint_prefix,
+            "      ",
+            MUTED,
+            width,
+        ));
+    }
+    rows.join("\n")
+}
+
+fn styled_notice_rows(
+    text: &str,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    style: Style,
+    width: usize,
+) -> Vec<String> {
+    let first_width = width.saturating_sub(visible_len(first_prefix)).max(1);
+    let continuation_width = width
+        .saturating_sub(visible_len(continuation_prefix))
+        .max(1);
+    let mut rows = Vec::new();
+    let mut prefix = first_prefix;
+    let mut available = first_width;
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let candidate_len =
+            current.chars().count() + usize::from(!current.is_empty()) + word.chars().count();
+        if !current.is_empty() && candidate_len > available {
+            rows.push(format!("{prefix}{style}{current}{RESET}"));
+            prefix = continuation_prefix;
+            available = continuation_width;
+            current.clear();
+        }
+        if word.chars().count() > available {
+            if !current.is_empty() {
+                rows.push(format!("{prefix}{style}{current}{RESET}"));
+                prefix = continuation_prefix;
+                available = continuation_width;
+                current.clear();
+            }
+            rows.push(format!(
+                "{prefix}{style}{}{RESET}",
+                truncate_visible(word, available)
+            ));
+            prefix = continuation_prefix;
+            available = continuation_width;
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(format!("{prefix}{style}{current}{RESET}"));
+    }
+    rows
 }
 
 /// A muted full-width horizontal rule, indented by `PAD`.
@@ -284,5 +392,41 @@ mod tests {
 
         COLORS_ENABLED.store(true, Ordering::Relaxed);
         ASCII_SYMBOLS.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn notice_separates_the_problem_from_its_recovery_hint() {
+        let rendered = notice_at_width(
+            NoticeKind::Warning,
+            "Backend unavailable",
+            Some("Run /backend to switch, or /login grok to sign in."),
+            80,
+        );
+        let rows = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("Backend unavailable"));
+        assert!(rows[1].contains("Run /backend to switch"));
+        assert!(
+            rows[1].starts_with("    "),
+            "hint should use a deeper gutter"
+        );
+    }
+
+    #[test]
+    fn notice_wraps_recovery_text_inside_narrow_terminals() {
+        let rendered = notice_at_width(
+            NoticeKind::Warning,
+            "Backend unavailable",
+            Some("Run /backend to switch providers, or /login grok to sign in and retry."),
+            42,
+        );
+
+        assert!(rendered.lines().count() >= 3);
+        assert!(
+            rendered.lines().all(|row| visible_len(row) <= 42),
+            "notice exceeded terminal width: {rendered:?}"
+        );
+        assert!(rendered.lines().skip(1).all(|row| row.starts_with("    ")));
     }
 }
