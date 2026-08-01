@@ -201,7 +201,6 @@ impl ComposerRegion {
                 output.push_str(&format!("\r{PAD}  {line}{RESET}\r\n"));
             }
         }
-        output.push_str("\r\n");
         output
     }
 }
@@ -1669,9 +1668,10 @@ mod tests {
         assert!(submitted.starts_with("\x1b[1A\r\x1b[0J"));
         assert!(submitted.contains('❯'));
         assert!(submitted.contains("find the tests"));
+        assert!(submitted.ends_with("\r\n"));
         assert!(
-            submitted.ends_with("\r\n\r\n"),
-            "submitted prompt should breathe before model activity: {submitted:?}"
+            !submitted.ends_with("\r\n\r\n"),
+            "the activity region owns the breathing row: {submitted:?}"
         );
         assert_eq!(region.clear(), "", "the temporary frame was released");
     }

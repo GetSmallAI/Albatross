@@ -563,6 +563,9 @@ pub struct TuiRenderer {
     /// current burst of reasoning deltas? Reset at end_turn so each turn
     /// gets its own header.
     reasoning_header_shown: bool,
+    /// The response heading belongs to the turn, not to each streaming burst.
+    /// Tool calls may close and later resume the answer without repeating it.
+    answer_header_shown: bool,
     /// `Some` while the assistant's answer panel (`╭─ response … ╰─`) is open
     /// and streaming. Holds the word-wrap state so content stays inside the
     /// panel. Closed when a tool call/reasoning interrupts or the turn ends.
@@ -613,6 +616,7 @@ impl TuiRenderer {
             active_region: ActiveRegion::default(),
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
+            answer_header_shown: false,
             answer_wrap: None,
             answer_md: None,
             base_tool_display,
@@ -729,6 +733,7 @@ impl TuiRenderer {
         self.end_reasoning();
         self.end_streaming();
         self.reasoning_header_shown = false;
+        self.answer_header_shown = false;
     }
 
     /// Close the assistant answer: flush the last buffered word and end the
@@ -784,9 +789,7 @@ impl TuiRenderer {
         }
         let mut out = std::io::stdout();
         if self.answer_wrap.is_none() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "{}", fade_header("response"));
-            let _ = write!(out, "{PAD}{TEXT}");
+            let _ = write!(out, "{}", self.answer_opening());
             // Wrap to the real content width so the answer fills the terminal
             // (like naturally-wrapped text) instead of overflowing.
             self.answer_wrap = Some(StreamWrap::new(content_width(), PAD));
@@ -800,6 +803,17 @@ impl TuiRenderer {
         let _ = out.flush();
     }
 
+    fn answer_opening(&mut self) -> String {
+        let mut opening = String::from("\n");
+        if !self.answer_header_shown {
+            opening.push_str(&fade_header("response"));
+            opening.push('\n');
+            self.answer_header_shown = true;
+        }
+        opening.push_str(&format!("{PAD}{TEXT}"));
+        opening
+    }
+
     fn render_reasoning(&mut self, delta: &str) {
         if !self.display.reasoning {
             return;
@@ -807,13 +821,16 @@ impl TuiRenderer {
         self.end_streaming();
         let mut out = std::io::stdout();
         if !self.reasoning_header_shown {
-            let _ = writeln!(out, "{GRAY}  thinking…{RESET}");
-            let _ = write!(out, "{DIM}  ");
+            let _ = write!(out, "{}", self.reasoning_opening());
             self.reasoning_header_shown = true;
         }
         let dimmed = delta.replace('\n', "\n  ");
         let _ = write!(out, "{dimmed}");
         let _ = out.flush();
+    }
+
+    fn reasoning_opening(&self) -> String {
+        format!("\n{GRAY}  reasoning{RESET}\n{DIM}  ")
     }
 
     fn render_tool_call(&mut self, name: &str, call_id: &str, args: Value, depth: u32) {
@@ -1446,6 +1463,34 @@ mod verbose_tests {
 
         assert!(r.answer_wrap.is_some());
         r.end_turn();
+    }
+
+    #[test]
+    fn response_heading_is_emitted_once_per_turn() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+
+        let first = r.answer_opening();
+        let resumed = r.answer_opening();
+        r.end_turn();
+        let next_turn = r.answer_opening();
+
+        assert!(first.contains("response"));
+        assert!(!resumed.contains("response"));
+        assert!(next_turn.contains("response"));
+    }
+
+    #[test]
+    fn visible_reasoning_reuses_the_activity_slot_with_a_distinct_label() {
+        let r = TuiRenderer::new(DisplayConfig {
+            reasoning: true,
+            ..Default::default()
+        });
+
+        let opening = r.reasoning_opening();
+
+        assert!(opening.starts_with('\n'));
+        assert!(opening.contains("reasoning"));
+        assert!(!opening.contains("thinking"));
     }
 
     #[test]

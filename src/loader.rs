@@ -15,7 +15,9 @@ impl ActivityRegion {
             return String::new();
         }
         let mut output = self.clear();
-        output.push_str(&format!("\r{PAD}{ACCENT}{DOT}{RESET} {BOLD}{text}{RESET}"));
+        output.push_str(&format!(
+            "\r\n\r{PAD}{ACCENT}{DOT}{RESET} {BOLD}{text}{RESET}"
+        ));
         self.current = Some(text.to_string());
         output
     }
@@ -24,7 +26,7 @@ impl ActivityRegion {
         if self.current.take().is_none() {
             return String::new();
         }
-        "\r\x1b[0J".to_string()
+        "\x1b[1A\r\x1b[0J".to_string()
     }
 }
 
@@ -81,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn activity_phase_replaces_one_owned_row_without_animation() {
+    fn activity_phase_owns_a_leading_gap_for_stable_handoffs() {
         let mut region = ActivityRegion::default();
 
         let thinking = region.replace("Thinking");
@@ -89,11 +91,13 @@ mod tests {
         let cleared = region.clear();
 
         assert!(thinking.contains("Thinking"));
-        assert!(!thinking.contains('\n'));
-        assert!(tools.starts_with("\r\x1b[0J"));
+        assert!(
+            thinking.starts_with("\r\n\r"),
+            "activity should reserve the same leading gap as tools and responses: {thinking:?}"
+        );
+        assert!(tools.starts_with("\x1b[1A\r\x1b[0J\r\n\r"));
         assert!(tools.contains("Using tools"));
-        assert!(!tools.contains('\n'));
-        assert_eq!(cleared, "\r\x1b[0J");
+        assert_eq!(cleared, "\x1b[1A\r\x1b[0J");
     }
 
     #[test]
