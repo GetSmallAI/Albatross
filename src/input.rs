@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{ACCENT, BOLD, MUTED, PAD, POINT, RESET};
+use crate::theme::{ACCENT, BOLD, MUTED, PAD, POINT, RESET, WARN, WARN_MARK};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -487,6 +487,254 @@ fn control_key_outcome(code: KeyCode, modifiers: KeyModifiers) -> Option<ReadLin
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectOption {
+    pub label: String,
+    pub shortcut: Option<char>,
+}
+
+impl SelectOption {
+    pub fn new(label: impl Into<String>, shortcut: Option<char>) -> Self {
+        Self {
+            label: label.into(),
+            shortcut: shortcut.map(|key| key.to_ascii_lowercase()),
+        }
+    }
+}
+
+fn shortcut_selection(options: &[SelectOption], pressed: char) -> Option<usize> {
+    let pressed = pressed.to_ascii_lowercase();
+    options
+        .iter()
+        .position(|option| option.shortcut == Some(pressed))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectPrompt {
+    pub title: String,
+    pub body: Vec<String>,
+    pub options: Vec<SelectOption>,
+    pub default_idx: usize,
+}
+
+/// Rich single-choice prompt for consequential actions. Unlike
+/// [`select_from_list`], the frame is removed after the decision so callers can
+/// replace it with a compact transcript receipt.
+pub async fn select_from_prompt(prompt: SelectPrompt) -> Result<Option<usize>> {
+    if prompt.options.is_empty() {
+        return Ok(None);
+    }
+    let outcome =
+        tokio::task::spawn_blocking(move || read_select_prompt_outcome(&prompt)).await??;
+    match outcome {
+        SelectOutcome::Selected(index) => Ok(Some(index)),
+        SelectOutcome::Cancelled => Ok(None),
+        SelectOutcome::Interrupted => {
+            crate::cursor::restore();
+            std::process::exit(0)
+        }
+        SelectOutcome::Eof => Err(anyhow!("input closed")),
+    }
+}
+
+fn render_select_prompt(prompt: &SelectPrompt, selected: usize) -> (String, usize) {
+    render_select_prompt_at_width(prompt, selected, crate::theme::cols())
+}
+
+fn wrap_plain_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let characters = line.chars().collect::<Vec<_>>();
+    if characters.is_empty() {
+        return vec![String::new()];
+    }
+    characters
+        .chunks(width)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn render_select_prompt_at_width(
+    prompt: &SelectPrompt,
+    selected: usize,
+    width: usize,
+) -> (String, usize) {
+    let width = width.max(20);
+    let selected = selected.min(prompt.options.len().saturating_sub(1));
+    let mut frame = String::new();
+    let mut rows = 0usize;
+
+    frame.push_str(&format!(
+        "{PAD}{WARN}{WARN_MARK}{RESET} {BOLD}{}{RESET}\r\n",
+        prompt.title
+    ));
+    rows += 1;
+
+    let body_indent = format!("{PAD}  ");
+    let body_width = width.saturating_sub(body_indent.chars().count()).max(1);
+    for (index, line) in prompt.body.iter().enumerate() {
+        for wrapped in wrap_plain_line(line, body_width) {
+            if index == 0 {
+                frame.push_str(&format!("{body_indent}{BOLD}{wrapped}{RESET}\r\n"));
+            } else if line.starts_with("Why approval is needed:") {
+                frame.push_str(&format!("{body_indent}{WARN}{wrapped}{RESET}\r\n"));
+            } else {
+                frame.push_str(&format!("{body_indent}{wrapped}{RESET}\r\n"));
+            }
+            rows += 1;
+        }
+    }
+    if !prompt.body.is_empty() {
+        frame.push_str("\r\n");
+        rows += 1;
+    }
+
+    for (index, option) in prompt.options.iter().enumerate() {
+        let number = index + 1;
+        let shortcut = option
+            .shortcut
+            .map(|key| format!("[{key}] "))
+            .unwrap_or_default();
+        let prefix_width = PAD.chars().count()
+            + 2
+            + number.to_string().chars().count()
+            + 2
+            + shortcut.chars().count();
+        let label_width = width.saturating_sub(prefix_width).max(1);
+        for (line_index, wrapped) in wrap_plain_line(&option.label, label_width)
+            .into_iter()
+            .enumerate()
+        {
+            if line_index == 0 && index == selected {
+                frame.push_str(&format!(
+                    "{PAD}{ACCENT}{POINT} {BOLD}{number}) {shortcut}{wrapped}{RESET}\r\n"
+                ));
+            } else if line_index == 0 {
+                frame.push_str(&format!(
+                    "{PAD}  {MUTED}{number}){RESET} {shortcut}{wrapped}{RESET}\r\n"
+                ));
+            } else {
+                frame.push_str(&format!("{}{wrapped}{RESET}\r\n", " ".repeat(prefix_width)));
+            }
+            rows += 1;
+        }
+    }
+
+    let hint = if width < 58 {
+        "↑/↓ move · Enter confirm · Esc deny"
+    } else {
+        "↑/↓ move · Enter confirm · 1-9 jump · Esc deny"
+    };
+    frame.push_str(&format!("{PAD}{MUTED}{hint}{RESET}"));
+    rows += 1;
+    (frame, rows)
+}
+
+fn read_select_prompt_outcome(prompt: &SelectPrompt) -> Result<SelectOutcome> {
+    let count = prompt.options.len();
+    if count == 0 {
+        return Ok(SelectOutcome::Cancelled);
+    }
+    let mut selected = prompt.default_idx.min(count - 1);
+    let mut out = std::io::stdout();
+
+    crate::cursor::set_state(crate::cursor::CursorState::Passive)?;
+    crossterm::terminal::enable_raw_mode()?;
+    let result = (|| -> Result<SelectOutcome> {
+        let mut first = true;
+        let mut previous_rows = 0usize;
+        loop {
+            let (frame, rows) = render_select_prompt(prompt, selected);
+            if !first {
+                let up = previous_rows.saturating_sub(1);
+                if up > 0 {
+                    write!(out, "\x1b[{up}A")?;
+                }
+                write!(out, "\r\x1b[0J")?;
+            } else {
+                write!(out, "\r")?;
+            }
+            first = false;
+            write!(out, "{frame}")?;
+            out.flush()?;
+            previous_rows = rows;
+
+            loop {
+                let Event::Key(KeyEvent {
+                    code,
+                    modifiers,
+                    kind,
+                    ..
+                }) = crossterm::event::read()?
+                else {
+                    continue;
+                };
+                if kind == KeyEventKind::Release {
+                    continue;
+                }
+                if let Some(control) = control_key_outcome(code, modifiers) {
+                    clear_select_frame(&mut out, previous_rows)?;
+                    return Ok(match control {
+                        ReadLineOutcome::Interrupted => SelectOutcome::Interrupted,
+                        ReadLineOutcome::Eof => SelectOutcome::Eof,
+                        ReadLineOutcome::Line(_) => unreachable!(),
+                    });
+                }
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        break;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(count - 1);
+                        break;
+                    }
+                    KeyCode::Home => {
+                        selected = 0;
+                        break;
+                    }
+                    KeyCode::End => {
+                        selected = count - 1;
+                        break;
+                    }
+                    KeyCode::Enter => {
+                        clear_select_frame(&mut out, previous_rows)?;
+                        return Ok(SelectOutcome::Selected(selected));
+                    }
+                    KeyCode::Esc => {
+                        clear_select_frame(&mut out, previous_rows)?;
+                        return Ok(SelectOutcome::Cancelled);
+                    }
+                    KeyCode::Char(character) => {
+                        if let Some(index) = shortcut_selection(&prompt.options, character) {
+                            clear_select_frame(&mut out, previous_rows)?;
+                            return Ok(SelectOutcome::Selected(index));
+                        }
+                        if let Some(digit) = character.to_digit(10).map(|value| value as usize) {
+                            if (1..=count.min(9)).contains(&digit) {
+                                clear_select_frame(&mut out, previous_rows)?;
+                                return Ok(SelectOutcome::Selected(digit - 1));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+    crossterm::terminal::disable_raw_mode()?;
+    result
+}
+
+fn clear_select_frame(out: &mut impl Write, rows: usize) -> Result<()> {
+    let up = rows.saturating_sub(1);
+    if up > 0 {
+        write!(out, "\x1b[{up}A")?;
+    }
+    write!(out, "\r\x1b[0J")?;
+    out.flush()?;
+    Ok(())
+}
+
 /// Interactive single-choice menu (↑/↓, Enter, number keys, q/Esc).
 ///
 /// Returns `Some(index)` on confirm, `None` on cancel. Ctrl-C exits the process
@@ -870,6 +1118,73 @@ mod tests {
             pointer_pos < sel_pos,
             "pointer should precede selected label"
         );
+    }
+
+    #[test]
+    fn rich_select_prompt_renders_context_and_explicit_shortcuts() {
+        let prompt = SelectPrompt {
+            title: "Permission required".into(),
+            body: vec![
+                "Read directory outside workspace".into(),
+                "/tmp/Albatross".into(),
+            ],
+            options: vec![
+                SelectOption::new("Allow once", Some('y')),
+                SelectOption::new("Allow this directory for the session", Some('s')),
+                SelectOption::new("Deny", Some('n')),
+            ],
+            default_idx: 0,
+        };
+
+        let (frame, rows) = render_select_prompt(&prompt, 1);
+
+        assert_eq!(rows, 8, "title + body + gap + 3 options + hint");
+        assert!(frame.contains("Permission required"));
+        assert!(frame.contains("Read directory outside workspace"));
+        assert!(frame.contains("/tmp/Albatross"));
+        assert!(frame.contains("▸"));
+        assert!(frame.contains("2) [s] Allow this directory for the session"));
+        assert!(frame.contains("[y] Allow once"));
+        assert!(frame.contains("[s] Allow this directory for the session"));
+        assert!(frame.contains("Esc deny"));
+    }
+
+    #[test]
+    fn rich_select_prompt_maps_direct_shortcuts_to_options() {
+        let options = vec![
+            SelectOption::new("Allow once", Some('y')),
+            SelectOption::new("Allow for session", Some('s')),
+            SelectOption::new("Deny", Some('n')),
+        ];
+
+        assert_eq!(shortcut_selection(&options, 'Y'), Some(0));
+        assert_eq!(shortcut_selection(&options, 's'), Some(1));
+        assert_eq!(shortcut_selection(&options, 'n'), Some(2));
+        assert_eq!(shortcut_selection(&options, 'x'), None);
+    }
+
+    #[test]
+    fn rich_select_prompt_wraps_long_content_without_breaking_repaint_rows() {
+        let prompt = SelectPrompt {
+            title: "Permission required".into(),
+            body: vec!["/Users/example/a-very-long-workspace-name/src/application.rs".into()],
+            options: vec![SelectOption::new(
+                "Allow every file_read call this session — broader access",
+                Some('a'),
+            )],
+            default_idx: 0,
+        };
+
+        let (frame, rows) = render_select_prompt_at_width(&prompt, 0, 42);
+
+        assert_eq!(rows, frame.lines().count());
+        assert!(
+            frame
+                .lines()
+                .all(|line| crate::theme::visible_len(line) <= 42),
+            "frame exceeded terminal width: {frame:?}"
+        );
+        assert!(rows > 5, "body and option should both wrap: {frame:?}");
     }
 
     #[test]
