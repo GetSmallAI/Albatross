@@ -5,7 +5,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{ACCENT, BOLD, MUTED, PAD, POINT, PROMPT_CHAR, RESET, WARN, WARN_MARK};
+use crate::theme::{
+    fade_header, ACCENT, BOLD, MUTED, PAD, POINT, PROMPT_CHAR, RESET, TEXT, WARN, WARN_MARK,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -207,14 +209,12 @@ impl ComposerRegion {
             return output;
         };
 
-        for (index, line) in submitted.lines().enumerate() {
-            if index == 0 {
-                output.push_str(&format!(
-                    "\r{PAD}{ACCENT}{PROMPT_CHAR}{RESET} {line}{RESET}\r\n"
-                ));
-            } else {
-                output.push_str(&format!("\r{PAD}  {line}{RESET}\r\n"));
-            }
+        // Once submitted, a message is transcript content rather than an
+        // editable prompt. Give it the same role header as an assistant
+        // response; the arrow remains exclusive to the active composer.
+        output.push_str(&format!("\r\n{}\r\n", fade_header("user")));
+        for line in submitted.lines() {
+            output.push_str(&format!("\r{PAD}{TEXT}{line}{RESET}\r\n"));
         }
         output
     }
@@ -1841,7 +1841,11 @@ mod tests {
         let submitted = region.finish(Some("find the tests"));
 
         assert!(submitted.starts_with("\x1b[1A\r\x1b[0J"));
-        assert!(submitted.contains('❯'));
+        assert!(submitted.contains("user"));
+        assert!(
+            !submitted.contains('❯'),
+            "the prompt arrow belongs only to the active composer: {submitted:?}"
+        );
         assert!(submitted.contains("find the tests"));
         assert!(submitted.ends_with("\r\n"));
         assert!(
