@@ -64,7 +64,7 @@ use std::io::{IsTerminal, Read, Write};
 use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
 use crate::backends::{default_model, validate, BackendName};
-use crate::banner::print_session_header;
+use crate::banner::{compact_session_context_for, print_session_header};
 use crate::commands::dispatch;
 use crate::config::load_config;
 use crate::hooks::{
@@ -72,7 +72,9 @@ use crate::hooks::{
     load_hook_state_file_from, render_hook_context_block, HookEventName, HookInvocationContext,
     HookNotice, HookNoticeLevel, HookRegistry, HookTrustStatus,
 };
-use crate::input::{read_composer_with_history_outcome, InputHistory, ReadLineOutcome};
+use crate::input::{
+    read_composer_with_history_outcome, ComposerFooter, InputHistory, ReadLineOutcome,
+};
 use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, load_session_metadata, new_session_path};
@@ -1022,18 +1024,24 @@ async fn main() -> anyhow::Result<()> {
     state.session_hook_contexts =
         hook_context_messages(HookEventName::SessionStart, &start_outcome);
 
+    println!();
+    if state.config.display.show_banner {
+        print_session_header(&state.config, &state.model);
+    }
+    let mut first_prompt = true;
     loop {
-        // Refresh the compact session context immediately above each prompt.
-        // In this transcript-style TUI, repeating a small header keeps live
-        // model, mode, approval, and Git state visible without a full-screen
-        // retained-mode renderer.
-        println!();
-        if state.config.display.show_banner {
-            print_session_header(&state.config, &state.model);
+        if !first_prompt {
+            println!();
         }
+        let composer_footer = if first_prompt {
+            ComposerFooter::KeyboardHint
+        } else {
+            ComposerFooter::Session(compact_session_context_for(&state.config, &state.model))
+        };
         let input = match read_composer_with_history_outcome(
             input_history.entries().to_vec(),
             command_names.clone(),
+            composer_footer,
         )
         .await?
         {
@@ -1044,6 +1052,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
+        first_prompt = false;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;

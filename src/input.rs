@@ -123,8 +123,15 @@ pub async fn plain_read_line_with_history_outcome(
 pub async fn read_composer_with_history_outcome(
     history: Vec<String>,
     commands: Vec<(String, String)>,
+    footer: ComposerFooter,
 ) -> Result<ReadLineOutcome> {
-    tokio::task::spawn_blocking(move || read_composer_outcome(&history, &commands)).await?
+    tokio::task::spawn_blocking(move || read_composer_outcome(&history, &commands, footer)).await?
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerFooter {
+    KeyboardHint,
+    Session(String),
 }
 
 fn render_value(value: &str) -> String {
@@ -194,6 +201,7 @@ impl ComposerRegion {
                 output.push_str(&format!("\r{PAD}  {line}{RESET}\r\n"));
             }
         }
+        output.push_str("\r\n");
         output
     }
 }
@@ -204,6 +212,7 @@ fn render_composer(
     commands: &[(String, String)],
     sel: usize,
     dismissed: bool,
+    footer: &ComposerFooter,
     term_cols: usize,
 ) -> ComposerFrame {
     let width = term_cols.max(20);
@@ -297,12 +306,12 @@ fn render_composer(
         }
     }
 
-    let footer_hint = if width < 46 {
-        "Enter send · ^J newline"
-    } else {
-        "Enter send · Ctrl+J newline"
+    let footer_text = match footer {
+        ComposerFooter::KeyboardHint if width < 46 => "Enter send · ^J newline",
+        ComposerFooter::KeyboardHint => "Enter send · Ctrl+J newline",
+        ComposerFooter::Session(context) => context,
     };
-    let footer = truncate(&format!("{PAD}{bottom_left} {footer_hint}"), width);
+    let footer = truncate(&format!("{PAD}{bottom_left} {footer_text}"), width);
     text.push_str(&format!("\r\n{MUTED}{footer}{RESET}"));
 
     ComposerFrame {
@@ -346,8 +355,14 @@ fn layout_composer_text(
 }
 
 enum InputSurface {
-    Plain { prompt: String, prompt_cols: usize },
-    Composer { region: ComposerRegion },
+    Plain {
+        prompt: String,
+        prompt_cols: usize,
+    },
+    Composer {
+        region: ComposerRegion,
+        footer: ComposerFooter,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -375,12 +390,13 @@ impl InputSurface {
                 view.dismissed,
                 view.term_cols,
             ),
-            Self::Composer { region } => region.replace(render_composer(
+            Self::Composer { region, footer } => region.replace(render_composer(
                 view.chars,
                 view.cursor,
                 commands,
                 view.selected,
                 view.dismissed,
+                footer,
                 view.term_cols,
             )),
         }
@@ -410,7 +426,7 @@ impl InputSurface {
                 output.push_str("\r\n");
                 output
             }
-            Self::Composer { region } => {
+            Self::Composer { region, .. } => {
                 let value = submitted.then(|| view.chars.iter().collect::<String>());
                 region.finish(value.as_deref())
             }
@@ -596,10 +612,12 @@ fn read_plain_outcome(
 fn read_composer_outcome(
     history: &[String],
     commands: &[(String, String)],
+    footer: ComposerFooter,
 ) -> Result<ReadLineOutcome> {
     read_line_outcome(
         InputSurface::Composer {
             region: ComposerRegion::default(),
+            footer,
         },
         history,
         commands,
@@ -1575,11 +1593,30 @@ mod tests {
         assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
     }
 
+    fn render_hint_composer(
+        chars: &[char],
+        cursor: usize,
+        commands: &[(String, String)],
+        selected: usize,
+        dismissed: bool,
+        width: usize,
+    ) -> ComposerFrame {
+        render_composer(
+            chars,
+            cursor,
+            commands,
+            selected,
+            dismissed,
+            &ComposerFooter::KeyboardHint,
+            width,
+        )
+    }
+
     #[test]
     fn composer_gives_editing_a_dedicated_three_row_surface() {
         let chars: Vec<char> = "hello".chars().collect();
 
-        let frame = render_composer(&chars, chars.len(), &[], 0, false, 80);
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 80);
 
         assert_eq!(frame.rows, 3, "header + editor + keyboard hint");
         assert!(frame.text.contains("╭─ message"));
@@ -1592,17 +1629,29 @@ mod tests {
     }
 
     #[test]
+    fn composer_replaces_the_keyboard_hint_with_live_session_context() {
+        let chars = Vec::new();
+        let footer = ComposerFooter::Session("grok-4.5 · edit · ask · main*".into());
+
+        let frame = render_composer(&chars, 0, &[], 0, false, &footer, 80);
+
+        assert!(frame.text.contains("╰─ grok-4.5 · edit · ask · main*"));
+        assert!(!frame.text.contains("Enter send"));
+        assert_eq!(frame.rows, 3);
+    }
+
+    #[test]
     fn composer_redraw_clears_only_its_owned_rows_and_restores_the_edit_cursor() {
         let mut region = ComposerRegion::default();
         let first_chars: Vec<char> = "hello".chars().collect();
-        let first = render_composer(&first_chars, first_chars.len(), &[], 0, false, 80);
+        let first = render_hint_composer(&first_chars, first_chars.len(), &[], 0, false, 80);
         let initial = region.replace(first);
 
         assert!(initial.starts_with('\r'));
         assert!(initial.ends_with("\x1b[1A\r\x1b[11C"));
 
         let second_chars: Vec<char> = "hello!".chars().collect();
-        let second = render_composer(&second_chars, second_chars.len(), &[], 0, false, 80);
+        let second = render_hint_composer(&second_chars, second_chars.len(), &[], 0, false, 80);
         let repaint = region.replace(second);
 
         assert!(repaint.starts_with("\x1b[1A\r\x1b[0J"));
@@ -1613,14 +1662,17 @@ mod tests {
     fn composer_submission_replaces_the_editor_with_one_durable_user_receipt() {
         let mut region = ComposerRegion::default();
         let chars: Vec<char> = "find the tests".chars().collect();
-        let _ = region.replace(render_composer(&chars, chars.len(), &[], 0, false, 80));
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
 
         let submitted = region.finish(Some("find the tests"));
 
         assert!(submitted.starts_with("\x1b[1A\r\x1b[0J"));
         assert!(submitted.contains('❯'));
         assert!(submitted.contains("find the tests"));
-        assert!(submitted.ends_with("\r\n"));
+        assert!(
+            submitted.ends_with("\r\n\r\n"),
+            "submitted prompt should breathe before model activity: {submitted:?}"
+        );
         assert_eq!(region.clear(), "", "the temporary frame was released");
     }
 
@@ -1628,7 +1680,7 @@ mod tests {
     fn composer_multiline_input_owns_each_visual_row_and_tracks_the_cursor() {
         let chars: Vec<char> = "first\nsecond".chars().collect();
 
-        let frame = render_composer(&chars, chars.len(), &[], 0, false, 80);
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 80);
 
         assert_eq!(frame.rows, 4, "header + two editor rows + hint");
         assert_eq!(frame.cursor_row, 2);
@@ -1642,7 +1694,7 @@ mod tests {
     fn composer_wraps_inside_a_narrow_terminal_without_losing_row_ownership() {
         let chars: Vec<char> = "123456789012345678901234567890".chars().collect();
 
-        let frame = render_composer(&chars, chars.len(), &[], 0, false, 20);
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 20);
 
         assert_eq!(frame.rows, 5, "header + three wrapped editor rows + hint");
         assert_eq!(frame.cursor_row, 3);
@@ -1661,7 +1713,7 @@ mod tests {
     fn composer_keeps_command_completions_inside_its_owned_surface() {
         let chars: Vec<char> = "/co".chars().collect();
 
-        let frame = render_composer(&chars, chars.len(), &cmds(), 1, false, 80);
+        let frame = render_hint_composer(&chars, chars.len(), &cmds(), 1, false, 80);
 
         assert_eq!(frame.rows, 6, "header + editor + 3 matches + hint");
         assert_eq!(frame.cursor_row, 1);
@@ -1679,12 +1731,13 @@ mod tests {
     fn composer_resize_releases_the_previous_height_before_owning_the_new_height() {
         let chars: Vec<char> = "123456789012345678901234567890".chars().collect();
         let mut region = ComposerRegion::default();
-        let _ = region.replace(render_composer(&chars, chars.len(), &[], 0, false, 80));
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
 
-        let narrow = region.replace(render_composer(&chars, chars.len(), &[], 0, false, 20));
+        let narrow = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 20));
         assert!(narrow.starts_with("\x1b[1A\r\x1b[0J"));
 
-        let wide_again = region.replace(render_composer(&chars, chars.len(), &[], 0, false, 80));
+        let wide_again =
+            region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
         assert!(wide_again.starts_with("\x1b[3A\r\x1b[0J"));
     }
 
@@ -1692,7 +1745,7 @@ mod tests {
     fn interrupted_composer_clears_the_draft_without_creating_a_user_receipt() {
         let chars: Vec<char> = "unfinished thought".chars().collect();
         let mut region = ComposerRegion::default();
-        let _ = region.replace(render_composer(&chars, chars.len(), &[], 0, false, 80));
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
 
         let interrupted = region.finish(None);
 

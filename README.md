@@ -194,7 +194,7 @@ for their ports and start commands.
 ## First session
 
 ```text
-> what files are in src/?
+❯ what files are in src/?
 
   Listed src/  (24 files)
 
@@ -205,7 +205,7 @@ providers; tools/ contains the tool implementations…
   1.2k in · 87 out · 1 step · 1.0s · grok-4.5
     $0.0003 this turn · $0.0003 session
 
-> add a function in src/util.rs that lowercases a string and trims it
+❯ add a function in src/util.rs that lowercases a string and trims it
 
   Read src/util.rs
   Edited src/util.rs
@@ -218,7 +218,8 @@ providers; tools/ contains the tool implementations…
   +}
 
   Apply? [y/n/a]: y
-  checkpoint saved (1 file) — /undo to revert
+  ▸ Checkpoint saved · 1 file
+    └ Run /undo to revert this turn.
   3.4k in · 412 out · 2 steps · 2.4s · grok-4.5
     $0.001 this turn · $0.0013 session
 ```
@@ -1145,6 +1146,10 @@ runtime.
 
 ## Quality of life
 
+- **Quiet session chrome.** The full project/backend header appears once at
+  startup. After the onboarding hint, the composer footer keeps the live model,
+  mode, approval policy, branch, and dirty state visible without repeating the
+  banner between turns.
 - **`albatross --continue`** resumes the most recent session in cwd
   without picking from a list.
 - **`albatross completions bash|zsh|fish`** prints a completion script

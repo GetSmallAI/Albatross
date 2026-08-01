@@ -66,6 +66,20 @@ fn render_session_header(info: SessionHeaderInfo<'_>, width: usize) -> String {
     )
 }
 
+fn render_compact_session_context(info: SessionHeaderInfo<'_>) -> String {
+    let approval = match info.approval {
+        "dangerous-only" => "ask",
+        "always" => "ask all",
+        "never" => "no prompts",
+        other => other,
+    };
+    let mut workspace = info.branch.unwrap_or(info.project).to_string();
+    if info.dirty {
+        workspace.push('*');
+    }
+    format!("{} · {} · {approval} · {workspace}", info.model, info.mode)
+}
+
 fn workspace_context(workspace_root: &str) -> (String, Option<String>, bool) {
     let workspace = Path::new(workspace_root);
     let display_workspace = workspace
@@ -116,6 +130,19 @@ pub fn render_session_header_for(
         },
         width,
     )
+}
+
+pub fn compact_session_context_for(config: &crate::config::AgentConfig, model: &str) -> String {
+    let (project, branch, dirty) = workspace_context(&config.workspace_root);
+    render_compact_session_context(SessionHeaderInfo {
+        project: &project,
+        branch: branch.as_deref(),
+        dirty,
+        backend: config.backend.as_str(),
+        model,
+        mode: config.mode.as_str(),
+        approval: config.approval_policy.as_str(),
+    })
 }
 
 pub fn print_session_header(config: &crate::config::AgentConfig, model: &str) {
@@ -198,6 +225,21 @@ mod tests {
         assert_eq!(lines[2], "  openai-codex · gpt-5.2-codex");
         assert_eq!(lines[3], "  review · ask for risky actions");
         assert!(lines.iter().all(|line| line.chars().count() <= 40));
+    }
+
+    #[test]
+    fn compact_session_context_keeps_runtime_safety_and_branch_on_one_line() {
+        let rendered = render_compact_session_context(SessionHeaderInfo {
+            project: "Albatross",
+            branch: Some("main"),
+            dirty: true,
+            backend: "grok",
+            model: "grok-4.5",
+            mode: "edit",
+            approval: "dangerous-only",
+        });
+
+        assert_eq!(rendered, "grok-4.5 · edit · ask · main*");
     }
 
     #[test]
