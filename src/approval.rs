@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::agent::ApprovalProvider;
 use crate::input::{select_from_prompt, SelectOption, SelectPrompt};
@@ -15,12 +16,14 @@ const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 
 pub struct ApprovalCache {
     pub always_allow: HashSet<String>,
+    workspace_root: PathBuf,
 }
 
 impl ApprovalCache {
     pub fn new() -> Self {
         Self {
             always_allow: HashSet::new(),
+            workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 }
@@ -150,8 +153,7 @@ impl ApprovalProvider for ApprovalCache {
         }
         if let Some(diff) = preview.and_then(|value| value.diff.as_deref()) {
             println!();
-            println!("  {DIM}Proposed changes{RESET}");
-            crate::diff_view::print_diff(diff, 80);
+            crate::diff_view::print_compact_preview(diff, &self.workspace_root, 12);
             println!();
         } else {
             println!();

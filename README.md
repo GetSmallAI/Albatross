@@ -42,8 +42,9 @@ few that aren't usual:
   they never overwhelm the response.
 - **Semantic file receipts.** Creates, edits, and patches show the affected
   path, added and removed line counts, and hunk count without dumping tool JSON
-  into the transcript. Full arguments and output remain available in verbose
-  mode.
+  into the transcript. Approval previews use workspace-relative paths, omit
+  diff headers and hunk coordinates, and cap long changes before they crowd the
+  picker. Full arguments and output remain available in verbose mode.
 - **Calm failure states.** Warnings and errors lead with a readable summary,
   then put the recovery action on its own indented row. Cancelling a turn emits
   one warning, leaves conversation state unchanged, and returns to the composer.
