@@ -9,8 +9,8 @@ use crate::config::{DisplayConfig, ToolDisplay};
 use crate::markdown::{MarkdownInline, MdEvent};
 
 use crate::theme::{
-    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH, BRANCH_END, CHECK, DOT, FAIL,
-    HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, CHECK, DOT, FAIL, HOOK_STOP,
+    OK, PAD, PENDING, POINT, SUB, TEXT,
 };
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
@@ -349,12 +349,39 @@ struct PendingCall {
     output: Option<String>,
 }
 
+/// Format one completed tool as a self-contained transcript receipt.
+///
+/// Every physical row explicitly returns to column zero. This is defensive in
+/// a TUI: prompts, selectors, and spinners can leave the terminal's logical
+/// cursor column somewhere other than the left edge even after their visible
+/// content has been cleared.
+fn format_grouped_receipt(call: &PendingCall) -> String {
+    let label = label_past(&call.name);
+    let arg_str = formatter_for(&call.name, &call.args);
+    let mut rows = vec![format!(
+        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}"
+    )];
+    if let Some(output) = &call.output {
+        let summary = summarize_output(output);
+        if !summary.is_empty() {
+            rows.push(format!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}"));
+        }
+    }
+
+    let mut receipt = String::from("\r\n");
+    for row in rows {
+        receipt.push('\r');
+        receipt.push_str(&row);
+        receipt.push_str("\r\n");
+    }
+    receipt
+}
+
 pub struct TuiRenderer {
     display: DisplayConfig,
     tool_start: HashMap<String, Instant>,
     streaming: bool,
     grouped_pending: Vec<PendingCall>,
-    grouped_category: String,
     minimal_batch: BTreeMap<String, usize>,
     /// Per-turn flag: have we already printed the "thinking…" header for the
     /// current burst of reasoning deltas? Reset at end_turn so each turn
@@ -407,7 +434,6 @@ impl TuiRenderer {
             tool_start: HashMap::new(),
             streaming: false,
             grouped_pending: Vec::new(),
-            grouped_category: String::new(),
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
             answer_wrap: None,
@@ -632,11 +658,6 @@ impl TuiRenderer {
                 println!("  {color}{BOLT}{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
             }
             ToolDisplay::Grouped => {
-                let category = label_past(name).to_string();
-                if category != self.grouped_category {
-                    self.flush_grouped();
-                    self.grouped_category = category;
-                }
                 self.grouped_pending.push(PendingCall {
                     name: name.to_string(),
                     call_id: call_id.to_string(),
@@ -748,12 +769,14 @@ impl TuiRenderer {
                 println!("  {GREEN}{OK}{RESET} {DIM}{name} {dur}{RESET}");
             }
             ToolDisplay::Grouped => {
-                if let Some(p) = self
+                if let Some(index) = self
                     .grouped_pending
-                    .iter_mut()
-                    .find(|p| p.call_id == call_id)
+                    .iter()
+                    .position(|pending| pending.call_id == call_id)
                 {
-                    p.output = Some(output.to_string());
+                    let mut completed = self.grouped_pending.remove(index);
+                    completed.output = Some(output.to_string());
+                    self.write_grouped_receipt(&completed);
                 }
             }
             ToolDisplay::Verbose => {
@@ -799,39 +822,18 @@ impl TuiRenderer {
         if self.grouped_pending.is_empty() {
             return;
         }
-        // A block owns exactly one leading blank line and no trailing blank, so
-        // it separates cleanly from whatever came before without stacking a
-        // second blank against the next block's own leading gap.
-        println!();
-        let pending = std::mem::take(&mut self.grouped_pending);
-        let first = &pending[0];
-        let label = label_past(&first.name);
-
-        if pending.len() == 1 {
-            let arg_str = formatter_for(&first.name, &first.args);
-            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
-            if let Some(out) = &first.output {
-                let summary = summarize_output(out);
-                if !summary.is_empty() {
-                    println!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}");
-                }
-            }
-        } else {
-            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}");
-            let n = pending.len();
-            for (i, p) in pending.iter().enumerate() {
-                let is_last = i == n - 1;
-                let branch = if is_last { BRANCH_END } else { BRANCH };
-                let arg_str = formatter_for(&p.name, &p.args);
-                let summary = p
-                    .output
-                    .as_ref()
-                    .map(|o| format!("  {GRAY}{}{RESET}", summarize_output(o)))
-                    .unwrap_or_default();
-                println!("{PAD}  {GRAY}{branch}{RESET} {TEXT}{arg_str}{RESET}{summary}");
-            }
+        // Normally results remove and render calls one by one. If a turn ends
+        // without a matching result, still surface each orphaned call rather
+        // than silently dropping it or recombining it into a late batch.
+        for pending in std::mem::take(&mut self.grouped_pending) {
+            self.write_grouped_receipt(&pending);
         }
-        self.grouped_category.clear();
+    }
+
+    fn write_grouped_receipt(&self, call: &PendingCall) {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{}", format_grouped_receipt(call));
+        let _ = out.flush();
     }
 
     fn flush_minimal(&mut self) {
@@ -1049,6 +1051,53 @@ mod tests {
 mod verbose_tests {
     use super::*;
     use crate::config::{DisplayConfig, ToolDisplay};
+
+    #[test]
+    fn grouped_tools_leave_the_queue_as_each_result_arrives() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+        for (name, call_id) in [("list_dir", "list"), ("shell", "shell"), ("grep", "grep")] {
+            r.render_tool_call(name, call_id, serde_json::json!({"path": "."}), 0);
+        }
+
+        assert_eq!(r.grouped_pending.len(), 3);
+        r.render_tool_result("list_dir", "list", r#"{"count":22}"#, 0);
+
+        assert_eq!(
+            r.grouped_pending
+                .iter()
+                .map(|call| call.call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shell", "grep"],
+            "a completed tool must render and leave the queue immediately"
+        );
+    }
+
+    #[test]
+    fn grouped_receipts_anchor_every_physical_line_at_column_zero() {
+        let call = PendingCall {
+            name: "grep".into(),
+            call_id: "grep".into(),
+            args: serde_json::json!({"pattern": "test"}),
+            output: Some(r#"{"count":3,"matches":[]}"#.into()),
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        assert!(receipt.starts_with("\r\n"), "receipt owns its leading gap");
+        for line in receipt
+            .split("\r\n")
+            .skip(1)
+            .filter(|line| !line.is_empty())
+        {
+            assert!(
+                line.starts_with('\r'),
+                "every receipt row must explicitly return to column zero: {line:?}"
+            );
+        }
+        assert!(
+            receipt.ends_with("\r\n"),
+            "receipt leaves the cursor at column zero"
+        );
+    }
 
     #[test]
     fn hidden_reasoning_does_not_close_streaming_answer() {
