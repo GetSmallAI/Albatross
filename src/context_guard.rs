@@ -1028,6 +1028,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                 }],
+                provider_content: Vec::new(),
             },
             ChatMessage::Tool {
                 tool_call_id: "call-1".into(),
@@ -1039,6 +1040,7 @@ mod tests {
             ChatMessage::Assistant {
                 content: Some("done".into()),
                 tool_calls: vec![],
+                provider_content: Vec::new(),
             },
         ];
         let (older, recent) = partition_for_keep(&messages, 2).expect("partition");
@@ -1063,6 +1065,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                 }],
+                provider_content: Vec::new(),
             },
             ChatMessage::Tool {
                 tool_call_id: "call-1".into(),
@@ -1078,6 +1081,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                 }],
+                provider_content: Vec::new(),
             },
             ChatMessage::Tool {
                 tool_call_id: "call-2".into(),
@@ -1106,6 +1110,7 @@ mod tests {
             ChatMessage::Assistant {
                 content: Some("old answer".into()),
                 tool_calls: vec![],
+                provider_content: Vec::new(),
             },
             ChatMessage::User {
                 content: "current request".into(),
@@ -1231,6 +1236,7 @@ mod tests {
             ChatMessage::Assistant {
                 content: Some("old answer".into()),
                 tool_calls: vec![],
+                provider_content: Vec::new(),
             },
             ChatMessage::User {
                 content: "current request".into(),

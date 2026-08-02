@@ -865,6 +865,7 @@ async fn run_prompt_content(content: &str, state: &mut AppState) -> Result<()> {
     let assistant_msg = ChatMessage::Assistant {
         content: Some(assistant),
         tool_calls: Vec::new(),
+        provider_content: Vec::new(),
     };
     state.messages.push(assistant_msg.clone());
     save_message(&state.session_path, &assistant_msg)?;

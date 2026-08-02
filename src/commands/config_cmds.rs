@@ -702,6 +702,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         let env_name = match chosen {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
             BackendName::OpenAi => "OPENAI_API_KEY",
+            BackendName::Anthropic => "ANTHROPIC_API_KEY",
             BackendName::OpenAiCodex => "ChatGPT login",
             BackendName::Grok => "Grok login",
             _ => "API key",

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added a native `anthropic` backend using the documented Claude Messages and
+  Models APIs with `ANTHROPIC_API_KEY`; Claude.ai OAuth and subscription tokens
+  are intentionally unsupported.
+- Added Anthropic streaming text, tool calls, images, thinking-signature
+  round-tripping, model/effort receipts, cache-read and cache-write token
+  accounting, and date-aware Claude Sonnet 5 pricing.
+
 ## [2.1.0] - 2026-08-01
 
 ### Added

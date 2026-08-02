@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::model_system::{
-    backend_supports_effort, evaluate_coder_candidates, EffortLevel, ModelRef, ModelSystemConfig,
+    evaluate_coder_candidates, model_supports_effort, EffortLevel, ModelRef, ModelSystemConfig,
     ModelTierSet, ReviewModelSet, ReviewTier, RouteCandidate, RouteDecision, RoutingObjective,
     RoutingPolicy, TaskComplexity,
 };
@@ -412,6 +412,7 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            cache_creation_input_tokens,
             cost_usd,
             cost_source,
             duration_ms,
@@ -425,13 +426,14 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
                 unknown += 1;
             }
             println!(
-                "    {role}: {}:{} → {} · {} in/{} out/{} cached · {} · {:.1}s · {status}",
+                "    {role}: {}:{} → {} · {} in/{} out/{} cached/{} cache write · {} · {:.1}s · {status}",
                 requested_backend.as_str(),
                 requested_model,
                 actual_model.as_deref().unwrap_or("not reported"),
                 input_tokens,
                 output_tokens,
                 cached_input_tokens,
+                cache_creation_input_tokens,
                 cost_usd
                     .map(catalog::format_usd)
                     .unwrap_or_else(|| "$?".into()),
@@ -1174,7 +1176,7 @@ fn validate_selector_policy(selector: &ModelRef, policy: &RoutingPolicy) -> Resu
         && selector
             .effort
             .is_some_and(|effort| effort != EffortLevel::None)
-        && !backend_supports_effort(selector.backend)
+        && !model_supports_effort(selector.backend, &selector.model)
     {
         return Err(anyhow!(
             "routing policy requires effort support, but selector {} cannot apply effort",
@@ -1243,7 +1245,7 @@ fn enforce_routing_policy(
         .filter(|effort| *effort != EffortLevel::None);
     if policy.require_effort_support && requested_effort.is_some() {
         for candidate in candidates.iter_mut() {
-            if !backend_supports_effort(candidate.model.backend) {
+            if !model_supports_effort(candidate.model.backend, &candidate.model.model) {
                 let reason = format!(
                     "{} cannot apply selector-requested effort {}",
                     candidate.model.backend.as_str(),
@@ -1328,6 +1330,7 @@ async fn run_selector(
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     let mut cached_input_tokens = 0;
+    let mut cache_creation_input_tokens = 0;
     let mut actual_model = None;
     let mut provider = None;
     let started = Instant::now();
@@ -1355,16 +1358,19 @@ async fn run_selector(
             input_tokens += usage.prompt_tokens;
             output_tokens += usage.completion_tokens;
             cached_input_tokens += usage.cached_tokens();
+            cache_creation_input_tokens += usage.cache_creation_tokens();
             if let Some(cost) = usage.cost {
                 reported_cost = Some(cost);
             }
         }
     })
     .await;
-    let catalog_cost = catalog::turn_cost_usd(
+    let catalog_cost = catalog::turn_cost_with_cache_usd(
         selector.backend,
         actual_model.as_deref().unwrap_or(&selector.model),
         input_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
         output_tokens,
     );
     let (cost, cost_source) = if let Some(cost) = reported_cost {
@@ -1388,6 +1394,7 @@ async fn run_selector(
         input_tokens,
         output_tokens,
         cached_input_tokens,
+        cache_creation_input_tokens,
         cost_usd: cost,
         cost_source,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -1938,6 +1945,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 20,
             cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             cost_usd: Some(0.02),
             cost_source: "provider-reported",
             duration_ms: 123,

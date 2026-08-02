@@ -91,7 +91,10 @@ pub enum RouteLedgerEvent {
         effort_status: String,
         input_tokens: u32,
         output_tokens: u32,
+        #[serde(default)]
         cached_input_tokens: u32,
+        #[serde(default)]
+        cache_creation_input_tokens: u32,
         #[serde(default)]
         cost_usd: Option<f64>,
         cost_source: String,
@@ -142,6 +145,7 @@ pub struct ModelCallInput<'a> {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cached_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
     pub cost_usd: Option<f64>,
     pub cost_source: &'a str,
     pub duration_ms: u64,
@@ -206,6 +210,7 @@ pub fn task_preview(task: &str) -> String {
 
 pub fn effective_effort(
     backend: BackendName,
+    model: &str,
     requested: Option<EffortLevel>,
 ) -> (Option<String>, &'static str) {
     let Some(requested) = requested else {
@@ -231,6 +236,17 @@ pub fn effective_effort(
             ),
             None => (None, "disabled"),
         },
+        BackendName::Anthropic => {
+            let Some(effective) = crate::anthropic::effective_effort(model, requested) else {
+                return (None, "unsupported");
+            };
+            let status = if effective == requested.as_str() {
+                "applied"
+            } else {
+                "mapped"
+            };
+            (Some(effective.to_string()), status)
+        }
         BackendName::OpenAiCodex
         | BackendName::Ollama
         | BackendName::LmStudio
@@ -240,7 +256,8 @@ pub fn effective_effort(
 }
 
 pub fn model_call_event(input: ModelCallInput<'_>) -> RouteLedgerEvent {
-    let (effective_effort, effort_status) = effective_effort(input.backend, input.requested_effort);
+    let (effective_effort, effort_status) =
+        effective_effort(input.backend, input.requested_model, input.requested_effort);
     RouteLedgerEvent::ModelCall {
         timestamp: Utc::now().to_rfc3339(),
         route_id: input.route_id.map(str::to_string),
@@ -256,6 +273,7 @@ pub fn model_call_event(input: ModelCallInput<'_>) -> RouteLedgerEvent {
         input_tokens: input.input_tokens,
         output_tokens: input.output_tokens,
         cached_input_tokens: input.cached_input_tokens,
+        cache_creation_input_tokens: input.cache_creation_input_tokens,
         cost_usd: input.cost_usd,
         cost_source: input.cost_source.to_string(),
         duration_ms: input.duration_ms,
@@ -321,15 +339,43 @@ mod tests {
     #[test]
     fn effort_receipt_distinguishes_requested_from_effective() {
         assert_eq!(
-            effective_effort(BackendName::OpenAi, Some(EffortLevel::Max)),
+            effective_effort(BackendName::OpenAi, "gpt-5", Some(EffortLevel::Max)),
             (Some("high".into()), "mapped")
         );
         assert_eq!(
-            effective_effort(BackendName::Openrouter, Some(EffortLevel::Max)),
+            effective_effort(
+                BackendName::Openrouter,
+                "openrouter/auto",
+                Some(EffortLevel::Max)
+            ),
             (Some("xhigh".into()), "mapped")
         );
         assert_eq!(
-            effective_effort(BackendName::Ollama, Some(EffortLevel::High)),
+            effective_effort(
+                BackendName::Anthropic,
+                "claude-sonnet-5",
+                Some(EffortLevel::Minimal)
+            ),
+            (Some("low".into()), "mapped")
+        );
+        assert_eq!(
+            effective_effort(
+                BackendName::Anthropic,
+                "claude-sonnet-5",
+                Some(EffortLevel::XHigh)
+            ),
+            (Some("xhigh".into()), "applied")
+        );
+        assert_eq!(
+            effective_effort(
+                BackendName::Anthropic,
+                "claude-haiku-4-5",
+                Some(EffortLevel::Low)
+            ),
+            (None, "unsupported")
+        );
+        assert_eq!(
+            effective_effort(BackendName::Ollama, "qwen", Some(EffortLevel::High)),
             (None, "unsupported")
         );
     }
@@ -350,6 +396,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 20,
             cached_input_tokens: 5,
+            cache_creation_input_tokens: 0,
             cost_usd: Some(0.01),
             cost_source: "provider-reported",
             duration_ms: 123,

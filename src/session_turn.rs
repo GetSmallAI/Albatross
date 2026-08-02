@@ -9,7 +9,7 @@ use crate::app_state::AppState;
 use crate::backends::BackendDescriptor;
 use crate::budget::{format_bytes, headroom_bytes, measure_prompt_budget, usage_ratio};
 use crate::cancel::CancellationToken;
-use crate::catalog::{format_usd, turn_cost_usd};
+use crate::catalog::{format_usd, turn_cost_with_cache_usd};
 use crate::config::OperatorMode;
 use crate::context_guard::{
     guard_config_from, maybe_auto_compact, merge_system_prompt, rewrite_session_transcript,
@@ -185,6 +185,7 @@ fn format_footer(
     input_tokens: u32,
     output_tokens: u32,
     cached_input_tokens: u32,
+    cache_creation_input_tokens: u32,
     turn_cost: Option<f64>,
     backend_is_local: bool,
     session_usd: f64,
@@ -204,6 +205,12 @@ fn format_footer(
     // (which never report cached tokens) don't get a misleading "0 cached".
     if cached_input_tokens > 0 {
         parts.push(format!("{} cached", format_tokens(cached_input_tokens)));
+    }
+    if cache_creation_input_tokens > 0 {
+        parts.push(format!(
+            "{} cache write",
+            format_tokens(cache_creation_input_tokens)
+        ));
     }
     let cost = format_cost_suffix(
         turn_cost,
@@ -900,10 +907,12 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             println!("  {YELLOW}!{RESET} {DIM}scorecard turn not recorded: {e}{RESET}");
         }
     }
-    let catalog_cost = turn_cost_usd(
+    let catalog_cost = turn_cost_with_cache_usd(
         state.config.backend,
         &state.model,
         res.input_tokens,
+        res.cached_input_tokens,
+        res.cache_creation_input_tokens,
         res.output_tokens,
     );
     let (turn_cost, cost_source) = if let Some(cost) = res.reported_cost_usd {
@@ -942,6 +951,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         input_tokens: res.input_tokens,
         output_tokens: res.output_tokens,
         cached_input_tokens: res.cached_input_tokens,
+        cache_creation_input_tokens: res.cache_creation_input_tokens,
         cost_usd: turn_cost,
         cost_source,
         duration_ms: metrics.model_ms,
@@ -1075,6 +1085,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             res.input_tokens,
             res.output_tokens,
             res.cached_input_tokens,
+            res.cache_creation_input_tokens,
             turn_cost,
             state.config.backend.is_local(),
             state.session_usd,
@@ -1317,7 +1328,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1343,6 +1354,7 @@ mod cost_tests {
             500,
             120,
             0,
+            0,
             Some(0.01),
             false,
             0.01,
@@ -1365,7 +1377,7 @@ mod cost_tests {
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
+            100, 50, 0, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1378,6 +1390,7 @@ mod cost_tests {
         let footer = format_footer(
             100,
             50,
+            0,
             0,
             None,
             true,
@@ -1400,14 +1413,24 @@ mod cost_tests {
         let metrics = TurnMetrics::default();
         // Provider reported a cache hit: surface it between out and cost.
         let hit = format_footer(
-            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 900, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(hit.contains("1.2k in · 87 out · 900 cached"));
         // No cache hit reported: no "cached" part at all.
         let miss = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(!miss.contains("cached"));
+    }
+
+    #[test]
+    fn footer_shows_cache_writes_only_when_present() {
+        let metrics = TurnMetrics::default();
+        let footer = format_footer(
+            1200, 87, 0, 450, None, false, 0.0, false, None, &metrics, "", "", "", "",
+        );
+        assert!(footer.contains("450 cache write"));
+        assert!(!footer.contains("cached"));
     }
 
     #[test]
@@ -1484,6 +1507,7 @@ mod cost_tests {
             ChatMessage::Assistant {
                 content: Some("answer".into()),
                 tool_calls: vec![],
+                provider_content: Vec::new(),
             },
             ChatMessage::User {
                 content: UserContent::Text("how does the parser work".into()),

@@ -199,7 +199,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "List or trust project MCP servers"),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex, grok); --default persists",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, anthropic, openai-codex, grok); --default persists",
     ),
     (
         "/model",
@@ -924,6 +924,7 @@ async fn cmd_plan_route(
     let mut input_tokens = 0;
     let mut output_tokens = 0;
     let mut cached_input_tokens = 0;
+    let mut cache_creation_input_tokens = 0;
     let mut actual_model = None;
     let mut provider = None;
     let started = Instant::now();
@@ -951,6 +952,7 @@ async fn cmd_plan_route(
             input_tokens += usage.prompt_tokens;
             output_tokens += usage.completion_tokens;
             cached_input_tokens += usage.cached_tokens();
+            cache_creation_input_tokens += usage.cache_creation_tokens();
             if let Some(cost) = usage.cost {
                 reported_cost = Some(cost);
             }
@@ -958,10 +960,12 @@ async fn cmd_plan_route(
     })
     .await;
 
-    let catalog_cost = catalog::turn_cost_usd(
+    let catalog_cost = catalog::turn_cost_with_cache_usd(
         planner.backend,
         actual_model.as_deref().unwrap_or(&planner.model),
         input_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
         output_tokens,
     );
     let (planner_cost, cost_source) = if let Some(cost) = reported_cost {
@@ -985,6 +989,7 @@ async fn cmd_plan_route(
         input_tokens,
         output_tokens,
         cached_input_tokens,
+        cache_creation_input_tokens,
         cost_usd: planner_cost,
         cost_source,
         duration_ms: started.elapsed().as_millis() as u64,

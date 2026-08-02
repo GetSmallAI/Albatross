@@ -10,6 +10,7 @@ pub enum BackendName {
     LlamaCpp,
     Openrouter,
     OpenAi,
+    Anthropic,
     OpenAiCodex,
     Grok,
 }
@@ -23,6 +24,7 @@ impl BackendName {
             BackendName::LlamaCpp => "llamacpp",
             BackendName::Openrouter => "openrouter",
             BackendName::OpenAi => "openai",
+            BackendName::Anthropic => "anthropic",
             BackendName::OpenAiCodex => "openai-codex",
             BackendName::Grok => "grok",
         }
@@ -35,6 +37,7 @@ impl BackendName {
             "llamacpp" | "llama-cpp" | "llama.cpp" => Some(Self::LlamaCpp),
             "openrouter" => Some(Self::Openrouter),
             "openai" | "open-ai" => Some(Self::OpenAi),
+            "anthropic" | "claude" => Some(Self::Anthropic),
             "openai-codex" | "open-ai-codex" | "codex" | "chatgpt" => Some(Self::OpenAiCodex),
             "grok" | "xai" | "xai-oauth" | "x-ai" | "supergrok" | "grok-oauth" => Some(Self::Grok),
             _ => None,
@@ -48,6 +51,7 @@ impl BackendName {
             Self::LlamaCpp,
             Self::Openrouter,
             Self::OpenAi,
+            Self::Anthropic,
             Self::OpenAiCodex,
             Self::Grok,
         ]
@@ -59,7 +63,9 @@ impl BackendName {
     pub fn is_local(&self) -> bool {
         match self {
             Self::Ollama | Self::LmStudio | Self::Mlx | Self::LlamaCpp => true,
-            Self::Openrouter | Self::OpenAi | Self::OpenAiCodex | Self::Grok => false,
+            Self::Openrouter | Self::OpenAi | Self::Anthropic | Self::OpenAiCodex | Self::Grok => {
+                false
+            }
         }
     }
 
@@ -148,6 +154,14 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             is_local: false,
             openrouter: OpenRouterConfig::default(),
         },
+        BackendName::Anthropic => BackendDescriptor {
+            name,
+            base_url: std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com/v1".into()),
+            api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        },
         BackendName::OpenAiCodex => BackendDescriptor {
             name,
             base_url: std::env::var("OPENAI_CODEX_BASE_URL")
@@ -202,6 +216,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         BackendName::LlamaCpp => "gpt-3.5-turbo",
         BackendName::Openrouter => "qwen/qwen-2.5-coder-32b-instruct",
         BackendName::OpenAi => "gpt-4o-mini",
+        BackendName::Anthropic => "claude-sonnet-5",
         BackendName::OpenAiCodex => "gpt-5.5",
         BackendName::Grok => "grok-4.5",
     }
@@ -216,6 +231,11 @@ pub fn validate(b: &BackendDescriptor) -> Result<()> {
     }
     if matches!(b.name, BackendName::OpenAi) && b.api_key.is_empty() {
         return Err(anyhow!("OPENAI_API_KEY is required when BACKEND=openai."));
+    }
+    if matches!(b.name, BackendName::Anthropic) && b.api_key.is_empty() {
+        return Err(anyhow!(
+            "ANTHROPIC_API_KEY is required when BACKEND=anthropic."
+        ));
     }
     if matches!(b.name, BackendName::OpenAiCodex)
         && crate::auth::AuthStore::load()
@@ -290,6 +310,7 @@ mod tests {
         assert!(BackendName::LlamaCpp.is_local());
         assert!(!BackendName::Openrouter.is_local());
         assert!(!BackendName::OpenAi.is_local());
+        assert!(!BackendName::Anthropic.is_local());
         assert!(!BackendName::OpenAiCodex.is_local());
         assert!(!BackendName::Grok.is_local());
         assert!(BackendName::Grok.is_oauth_login());
@@ -321,6 +342,21 @@ mod tests {
     fn defaults_openai_to_gpt_4o_mini() {
         let model = default_model(&descriptor(BackendName::OpenAi), None);
         assert_eq!(model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn parses_and_defaults_anthropic() {
+        assert_eq!(
+            BackendName::parse("anthropic"),
+            Some(BackendName::Anthropic)
+        );
+        assert_eq!(BackendName::parse("claude"), Some(BackendName::Anthropic));
+        assert!(BackendName::all().contains(&BackendName::Anthropic));
+        assert_eq!(BackendName::Anthropic.as_str(), "anthropic");
+        assert_eq!(
+            default_model(&descriptor(BackendName::Anthropic), None),
+            "claude-sonnet-5"
+        );
     }
 
     #[test]
@@ -380,6 +416,15 @@ mod tests {
         desc.is_local = false;
         assert!(validate(&desc).is_err());
         desc.api_key = "sk-test".into();
+        assert!(validate(&desc).is_ok());
+    }
+
+    #[test]
+    fn validate_requires_anthropic_api_key() {
+        let mut desc = descriptor(BackendName::Anthropic);
+        desc.is_local = false;
+        assert!(validate(&desc).is_err());
+        desc.api_key = "sk-ant-test".into();
         assert!(validate(&desc).is_ok());
     }
 }

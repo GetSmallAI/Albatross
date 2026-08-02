@@ -440,6 +440,7 @@ mod tests {
         let names: Vec<_> = secret_env_var_names().collect();
         assert!(names.contains(&"OPENAI_API_KEY"));
         assert!(names.contains(&"OPENROUTER_API_KEY"));
+        assert!(names.contains(&"ANTHROPIC_API_KEY"));
     }
 
     #[tokio::test]

@@ -340,11 +340,12 @@ impl RouteCandidate {
     }
 }
 
-pub fn backend_supports_effort(backend: BackendName) -> bool {
-    matches!(
-        backend,
-        BackendName::Openrouter | BackendName::OpenAi | BackendName::Grok
-    )
+pub fn model_supports_effort(backend: BackendName, model: &str) -> bool {
+    match backend {
+        BackendName::Anthropic => crate::anthropic::model_supports_effort(model),
+        BackendName::Openrouter | BackendName::OpenAi | BackendName::Grok => true,
+        _ => false,
+    }
 }
 
 pub fn evaluate_coder_candidates(
@@ -375,7 +376,7 @@ pub fn evaluate_coder_candidates(
         if policy.local_only && !model.backend.is_local() {
             exclusions.push("policy requires a local backend".into());
         }
-        if model.effort.is_some() && !backend_supports_effort(model.backend) {
+        if model.effort.is_some() && !model_supports_effort(model.backend, &model.model) {
             let message = format!("{} does not apply requested effort", model.backend.as_str());
             if policy.require_effort_support {
                 exclusions.push(message);

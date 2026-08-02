@@ -52,6 +52,7 @@ fn build_request_body(req: &ChatRequest<'_>) -> Value {
             ChatMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if let Some(text) = content.as_ref().filter(|s| !s.is_empty()) {
                     input.push(json!({
@@ -174,6 +175,7 @@ fn one_content_chunk(delta: String) -> StreamChunk {
             },
         }],
         usage: None,
+        provider_content_block: None,
     }
 }
 
@@ -189,6 +191,7 @@ fn one_reasoning_chunk(delta: String) -> StreamChunk {
             },
         }],
         usage: None,
+        provider_content_block: None,
     }
 }
 
@@ -216,6 +219,7 @@ fn one_tool_chunk(
             },
         }],
         usage: None,
+        provider_content_block: None,
     }
 }
 
@@ -233,7 +237,9 @@ fn usage_chunk(input: u32, output: u32, cached: u32) -> StreamChunk {
                 cached_tokens: cached,
             }),
             cost: None,
+            cache_creation_input_tokens: 0,
         }),
+        provider_content_block: None,
     }
 }
 

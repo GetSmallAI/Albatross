@@ -83,6 +83,8 @@ pub struct RunResult {
     /// Portion of `input_tokens` the provider served from its prompt cache
     /// across this turn's steps (0 when the provider reports no cache details).
     pub cached_input_tokens: u32,
+    /// Portion of `input_tokens` written into the provider's prompt cache.
+    pub cache_creation_input_tokens: u32,
     pub reported_cost_usd: Option<f64>,
     /// Last provider-resolved model/provider observed across the streamed
     /// steps. These differ from the requested id for dynamic routers.
@@ -319,6 +321,7 @@ where
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
     let mut total_cached: u32 = 0;
+    let mut total_cache_creation: u32 = 0;
     let mut reported_cost_usd: Option<f64> = None;
     let mut actual_model: Option<String> = None;
     let mut provider: Option<String> = None;
@@ -373,6 +376,7 @@ where
         let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
         let mut saw_first_token = false;
         let mut step_reported_cost_usd: Option<f64> = None;
+        let mut provider_content = Vec::new();
 
         stream_chat(http, backend, &req, cancel.clone(), |chunk| {
             if chunk
@@ -447,9 +451,13 @@ where
                 total_in += usage.prompt_tokens;
                 total_out += usage.completion_tokens;
                 total_cached += usage.cached_tokens();
+                total_cache_creation += usage.cache_creation_tokens();
                 if let Some(cost) = usage.cost {
                     step_reported_cost_usd = Some(cost);
                 }
+            }
+            if let Some(block) = chunk.provider_content_block {
+                provider_content.push(block);
             }
         })
         .await?;
@@ -502,6 +510,7 @@ where
             messages.push(ChatMessage::Assistant {
                 content: assistant_content,
                 tool_calls: final_calls,
+                provider_content,
             });
             natural_stop = true;
             break;
@@ -761,6 +770,7 @@ where
         messages.push(ChatMessage::Assistant {
             content: assistant_content,
             tool_calls: tcs.clone(),
+            provider_content,
         });
 
         fn value_to_string(result: &Value) -> String {
@@ -1042,6 +1052,7 @@ where
         input_tokens: total_in,
         output_tokens: total_out,
         cached_input_tokens: total_cached,
+        cache_creation_input_tokens: total_cache_creation,
         reported_cost_usd,
         actual_model,
         provider,
@@ -1223,6 +1234,7 @@ mod tests {
         let mut messages = vec![ChatMessage::Assistant {
             content: Some("done".into()),
             tool_calls: Vec::new(),
+            provider_content: Vec::new(),
         }];
 
         append_hook_context_messages(

@@ -82,9 +82,71 @@ const OPENAI_MODELS: &[ModelInfo] = &[
     },
 ];
 
+const ANTHROPIC_MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id: "claude-fable-5",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 10.00,
+        output_per_mtoken_usd: 50.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-opus-5",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 5.00,
+        output_per_mtoken_usd: 25.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-sonnet-5",
+        context_tokens: 1_000_000,
+        // Standard pricing begins 2026-09-01. `effective_rates_at` applies
+        // the published $2/$10 introductory price through 2026-08-31.
+        input_per_mtoken_usd: 3.00,
+        output_per_mtoken_usd: 15.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-haiku-4-5",
+        context_tokens: 200_000,
+        input_per_mtoken_usd: 1.00,
+        output_per_mtoken_usd: 5.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-opus-4-8",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 5.00,
+        output_per_mtoken_usd: 25.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-opus-4-7",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 5.00,
+        output_per_mtoken_usd: 25.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-opus-4-6",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 5.00,
+        output_per_mtoken_usd: 25.00,
+        vision: true,
+    },
+    ModelInfo {
+        id: "claude-sonnet-4-6",
+        context_tokens: 1_000_000,
+        input_per_mtoken_usd: 3.00,
+        output_per_mtoken_usd: 15.00,
+        vision: true,
+    },
+];
+
 fn table_for(backend: BackendName) -> &'static [ModelInfo] {
     match backend {
         BackendName::OpenAi => OPENAI_MODELS,
+        BackendName::Anthropic => ANTHROPIC_MODELS,
         // Local backends don't have meaningful $-per-token; OpenRouter
         // pricing varies per model and is best looked up live.
         _ => &[],
@@ -119,13 +181,29 @@ pub fn lookup(backend: BackendName, model_id: &str) -> Option<&'static ModelInfo
 /// id). Cost is omitted entirely for entries where both rates are 0.
 pub fn format_cost_label(info: &ModelInfo) -> String {
     let ctx = format_context(info.context_tokens);
-    if info.input_per_mtoken_usd == 0.0 && info.output_per_mtoken_usd == 0.0 {
+    let today = chrono::Utc::now().date_naive();
+    let (input_rate, output_rate, promotional) = effective_rates_at(info, today);
+    if input_rate == 0.0 && output_rate == 0.0 {
         format!("{ctx} ctx")
     } else {
-        format!(
+        let mut label = format!(
             "{ctx} ctx · ${:.2}/${:.2} per Mtoken",
-            info.input_per_mtoken_usd, info.output_per_mtoken_usd
-        )
+            input_rate, output_rate
+        );
+        if promotional {
+            label.push_str(" · promo through 2026-08-31");
+        }
+        label
+    }
+}
+
+fn effective_rates_at(info: &ModelInfo, date: chrono::NaiveDate) -> (f32, f32, bool) {
+    let sonnet_5_promo_end =
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 31).expect("valid Sonnet 5 promotional end date");
+    if info.id == "claude-sonnet-5" && date <= sonnet_5_promo_end {
+        (2.00, 10.00, true)
+    } else {
+        (info.input_per_mtoken_usd, info.output_per_mtoken_usd, false)
     }
 }
 
@@ -139,9 +217,34 @@ pub fn turn_cost_usd(
     tokens_in: u32,
     tokens_out: u32,
 ) -> Option<f64> {
+    turn_cost_with_cache_usd(backend, model_id, tokens_in, 0, 0, tokens_out)
+}
+
+/// Catalog cost with provider cache accounting. `tokens_in` includes regular,
+/// cache-read, and cache-write input tokens. Anthropic bills five-minute cache
+/// writes at 1.25x and cache reads at 0.1x the base input rate.
+pub fn turn_cost_with_cache_usd(
+    backend: BackendName,
+    model_id: &str,
+    tokens_in: u32,
+    cached_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+    tokens_out: u32,
+) -> Option<f64> {
     let info = lookup(backend, model_id)?;
-    let in_cost = tokens_in as f64 * info.input_per_mtoken_usd as f64 / 1_000_000.0;
-    let out_cost = tokens_out as f64 * info.output_per_mtoken_usd as f64 / 1_000_000.0;
+    let (input_rate, output_rate, _) = effective_rates_at(info, chrono::Utc::now().date_naive());
+    let cached = cached_input_tokens.min(tokens_in);
+    let cache_creation = cache_creation_input_tokens.min(tokens_in.saturating_sub(cached));
+    let regular = tokens_in
+        .saturating_sub(cached)
+        .saturating_sub(cache_creation);
+    let input_units = if matches!(backend, BackendName::Anthropic) {
+        regular as f64 + cached as f64 * 0.1 + cache_creation as f64 * 1.25
+    } else {
+        tokens_in as f64
+    };
+    let in_cost = input_units * input_rate as f64 / 1_000_000.0;
+    let out_cost = tokens_out as f64 * output_rate as f64 / 1_000_000.0;
     Some(in_cost + out_cost)
 }
 
@@ -250,6 +353,40 @@ mod tests {
     fn turn_cost_zero_for_zero_tokens() {
         let cost = turn_cost_usd(BackendName::OpenAi, "gpt-4o", 0, 0).unwrap();
         assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn anthropic_catalog_exposes_current_models() {
+        let info = lookup(BackendName::Anthropic, "claude-sonnet-5").unwrap();
+        assert_eq!(info.context_tokens, 1_000_000);
+        assert!(info.vision);
+        assert!(lookup(BackendName::Anthropic, "claude-haiku-4-5-20251001").is_some());
+    }
+
+    #[test]
+    fn sonnet_5_promotional_pricing_expires_on_schedule() {
+        let info = lookup(BackendName::Anthropic, "claude-sonnet-5").unwrap();
+        let during = chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let after = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        assert_eq!(effective_rates_at(info, during), (2.0, 10.0, true));
+        assert_eq!(effective_rates_at(info, after), (3.0, 15.0, false));
+    }
+
+    #[test]
+    fn anthropic_cache_cost_uses_published_multipliers() {
+        // Haiku 4.5 input is $1/MTok and output is $5/MTok. This request has
+        // 100 regular + 100 cache-read + 100 cache-write input tokens.
+        let cost = turn_cost_with_cache_usd(
+            BackendName::Anthropic,
+            "claude-haiku-4-5",
+            300,
+            100,
+            100,
+            100,
+        )
+        .unwrap();
+        let expected = (100.0 + 10.0 + 125.0) / 1_000_000.0 + 500.0 / 1_000_000.0;
+        assert!((cost - expected).abs() < 0.0000001, "got {cost}");
     }
 
     #[test]

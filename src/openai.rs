@@ -21,6 +21,11 @@ pub enum ChatMessage {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
+        /// Native provider content blocks that must be round-tripped exactly.
+        /// Anthropic thinking signatures are the first consumer. The field is
+        /// deliberately local-only so OpenAI-compatible wire JSON is unchanged.
+        #[serde(skip)]
+        provider_content: Vec<Value>,
     },
     Tool {
         tool_call_id: String,
@@ -183,6 +188,10 @@ pub struct StreamChunk {
     pub choices: Vec<StreamChoice>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// A completed native provider content block. Agent loops retain these on
+    /// the assistant message for protocols that require exact round-tripping.
+    #[serde(skip)]
+    pub provider_content_block: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,6 +241,10 @@ pub struct Usage {
     /// (a subset of `prompt_tokens`); local backends omit it.
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Prompt tokens written into a provider cache this call. Kept separate
+    /// because cache writes and hits have different prices.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -248,6 +261,10 @@ impl Usage {
             .as_ref()
             .map(|d| d.cached_tokens)
             .unwrap_or(0)
+    }
+
+    pub fn cache_creation_tokens(&self) -> u32 {
+        self.cache_creation_input_tokens
     }
 }
 
@@ -301,6 +318,9 @@ pub async fn list_models(
     if matches!(backend.name, BackendName::OpenAiCodex) {
         return Ok(crate::codex_responses::codex_model_list());
     }
+    if matches!(backend.name, BackendName::Anthropic) {
+        return crate::anthropic::list_models(client, backend).await;
+    }
     if matches!(backend.name, BackendName::Grok) {
         // Static catalog (same shape as openai-codex): avoid GET /models on
         // every `/model` open and only expose agent-ready Grok ids.
@@ -331,6 +351,9 @@ pub async fn chat_oneshot(
     if matches!(backend.name, BackendName::OpenAiCodex) {
         return crate::codex_responses::stream_codex_responses(client, backend, req, None, |_| {})
             .await;
+    }
+    if matches!(backend.name, BackendName::Anthropic) {
+        return crate::anthropic::chat_oneshot(client, backend, req).await;
     }
     let url = format!(
         "{}/chat/completions",
@@ -429,6 +452,9 @@ where
             client, backend, req, cancel, on_chunk,
         )
         .await;
+    }
+    if matches!(backend.name, BackendName::Anthropic) {
+        return crate::anthropic::stream_chat(client, backend, req, cancel, on_chunk).await;
     }
     let url = format!(
         "{}/chat/completions",

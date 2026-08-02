@@ -53,6 +53,7 @@ pub struct OAuthCredential {
 /// Providers that have a single API-key dimension and a fixed env var.
 /// Add to this when new cloud backends land.
 pub const KNOWN_PROVIDERS: &[(&str, &str)] = &[
+    ("anthropic", "ANTHROPIC_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
     ("openrouter", "OPENROUTER_API_KEY"),
 ];
@@ -249,16 +250,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_providers_includes_openai_and_openrouter() {
+    fn known_providers_includes_api_key_backends() {
         let names: Vec<&str> = KNOWN_PROVIDERS.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"openai"));
         assert!(names.contains(&"openrouter"));
+        assert!(names.contains(&"anthropic"));
     }
 
     #[test]
     fn env_var_lookup_works_for_known_providers() {
         assert_eq!(env_var_for("openai"), Some("OPENAI_API_KEY"));
         assert_eq!(env_var_for("openrouter"), Some("OPENROUTER_API_KEY"));
+        assert_eq!(env_var_for("anthropic"), Some("ANTHROPIC_API_KEY"));
         assert_eq!(env_var_for("not-a-provider"), None);
     }
 

@@ -502,6 +502,9 @@ fn backend_hint(backend: BackendName) -> &'static str {
         BackendName::OpenAi => {
             "set `OPENAI_API_KEY` before using the OpenAI backend (optionally `OPENAI_BASE_URL` for a compatible proxy)."
         }
+        BackendName::Anthropic => {
+            "set `ANTHROPIC_API_KEY` before using the Anthropic backend (optionally `ANTHROPIC_BASE_URL` for a compatible proxy)."
+        }
         BackendName::OpenAiCodex => {
             "run `/login openai-codex` to sign in with ChatGPT/Codex subscription OAuth."
         }

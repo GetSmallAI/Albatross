@@ -21,7 +21,7 @@
   <a href="https://crates.io/crates/albatross-cli"><img alt="crates.io" src="https://img.shields.io/crates/v/albatross-cli?label=crates.io&color=2563eb"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.86%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-2.1.0-111827">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
+  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Anthropic%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
@@ -118,25 +118,34 @@ Albatross talks to **one backend at a time** — pick the path that fits.
 
 *Fastest to start, frontier-model quality, nothing to install locally.*
 
-1. Set your key — OpenAI **or** OpenRouter:
+1. Set your key — Anthropic, OpenAI, **or** OpenRouter:
 
    ```bash
+   export ANTHROPIC_API_KEY=sk-ant-...
+   # or
    export OPENAI_API_KEY=sk-...
    # or
    export OPENROUTER_API_KEY=sk-or-...
    ```
 
 2. Launch, then select the provider in the first-run wizard (or any time with
-   `/backend openai`):
+   `/backend anthropic`):
 
    ```bash
    albatross
    ```
 
 Prefer not to put the key in your environment? Launch first, then run
-`/auth set openai` inside the app and paste it once — it's stored in a `0600`
+`/auth set anthropic` inside the app and paste it once — it's stored in a `0600`
 file under `~/.config/albatross/`. Cost per turn and per session shows
 live on the status line.
+
+The Anthropic backend uses the documented Claude API and your
+`ANTHROPIC_API_KEY`. It does **not** offer Claude.ai OAuth or use a Pro, Max,
+Team, or Enterprise subscription allowance; Anthropic's
+[Agent SDK guidance](https://code.claude.com/docs/en/agent-sdk/overview) requires
+prior approval before third-party products can offer subscription login or rate
+limits.
 
 ### Path A2 — ChatGPT / Codex subscription login
 
@@ -260,12 +269,13 @@ A handful of moves worth knowing right away:
 | `llamacpp` | `http://localhost:8080/v1` | Direct GGUF serving (via `llama-server`) |
 | `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models and Fusion |
 | `openai` | `https://api.openai.com/v1` | Direct provider access with your own key |
+| `anthropic` | `https://api.anthropic.com/v1` | Native Messages API with your own Anthropic API key |
 | `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
 | `grok` | `https://cli-chat-proxy.grok.com/v1` | SuperGrok / X Premium+ OAuth via `/login grok` (browser or device-code) |
 
 Switch at runtime with `/backend <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
-`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`. The Grok OAuth proxy is fixed to
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_CODEX_BASE_URL`. The Grok OAuth proxy is fixed to
 xAI's first-party host so subscription tokens cannot be redirected elsewhere.
 API backends require an API key (set via [`/auth`](#cost-and-credentials) or
 env var); `openai-codex` requires `/login openai-codex`; `grok` requires
@@ -291,6 +301,7 @@ for the live session choice and `(default)` for what's persisted on disk.
 | `llamacpp` | `gpt-3.5-turbo` |
 | `openrouter` | `qwen/qwen-2.5-coder-32b-instruct` |
 | `openai` | `gpt-4o-mini` |
+| `anthropic` | `claude-sonnet-5` |
 | `openai-codex` | `gpt-5.5` |
 | `grok` | `grok-4.5` |
 
@@ -448,6 +459,7 @@ no change in behavior.
 ```text
 /auth                    show what's configured (keys are masked)
 /auth set openai         paste your OpenAI key, save to file + this session
+/auth set anthropic      paste your Anthropic API key
 /auth set openrouter     paste your OpenRouter key
 /auth clear openai       remove from the file (env stays for this session)
 /login                   browser/device-code login for the active OAuth backend
@@ -490,6 +502,13 @@ including dynamic routers like Fusion; Albatross uses that reported value
 when present. If a cloud model does not expose cost, the turn shows `$?` and
 prefixes the session total with `≥` to signal it is a lower bound, not a
 fiction.
+
+Anthropic receipts preserve the requested and provider-resolved Claude model,
+requested and effective effort, regular input, cache reads, cache writes, output
+tokens, and catalog-estimated cost. Cache reads use Anthropic's 0.1x input rate
+and five-minute cache writes use 1.25x. Claude Sonnet 5's published introductory
+price is applied through August 31, 2026, then the catalog automatically uses
+the standard rate.
 
 The `/model` picker first accepts an optional text filter, then shows the same
 data in an arrow-key menu. It tags the live session choice `(selected)` and the
@@ -1050,12 +1069,14 @@ Resolution order (later overrides earlier):
 ### Environment variables (the useful ones)
 
 ```bash
-BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai|openai-codex|grok
+BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai|anthropic|openai-codex|grok
 AGENT_MODEL=qwen2.5-coder:14b                           # overrides the backend default model
 
 OPENAI_API_KEY=sk-...                                   # required for openai
+ANTHROPIC_API_KEY=sk-ant-...                            # required for anthropic
 OPENROUTER_API_KEY=sk-or-...                            # required for openrouter / /compare
 OPENAI_BASE_URL=https://api.openai.com/v1               # point at a compatible proxy if needed
+ANTHROPIC_BASE_URL=https://api.anthropic.com/v1         # optional Anthropic-compatible endpoint
 OPENAI_CODEX_BASE_URL=https://chatgpt.com/backend-api    # override Codex backend base if needed
 
 APPROVAL_POLICY=always                                  # always | dangerous-only | never
@@ -1248,6 +1269,7 @@ runtime.
 - **llama.cpp** — `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja` (the `--jinja` flag enables native tool calls).
 - **OpenRouter** — set `OPENROUTER_API_KEY` (or use `/auth set openrouter`).
 - **OpenAI** — set `OPENAI_API_KEY` (or use `/auth set openai`). Use `OPENAI_BASE_URL` for a compatible proxy.
+- **Anthropic** — set `ANTHROPIC_API_KEY` (or use `/auth set anthropic`). Use `ANTHROPIC_BASE_URL` for a compatible proxy.
 - **OpenAI Codex** — run `/login openai-codex`, then `/backend openai-codex`.
 - **Grok** — run `/login grok` (browser or device-code), then `/backend grok`.
 

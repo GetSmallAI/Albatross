@@ -294,6 +294,7 @@ pub fn render_markdown(entries: &[SessionEntry]) -> String {
             ChatMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 out.push_str("## Assistant\n\n");
                 if let Some(content) = content {

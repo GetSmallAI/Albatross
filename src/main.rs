@@ -2,6 +2,7 @@ mod agent;
 mod agent_eval;
 #[cfg(test)]
 mod agent_integration_test;
+mod anthropic;
 mod app_state;
 mod approval;
 mod auth;
@@ -662,6 +663,9 @@ async fn probe_backend(
                 crate::backends::BackendName::Openrouter => "Check OPENROUTER_API_KEY.",
                 crate::backends::BackendName::OpenAi => {
                     "Check OPENAI_API_KEY (or OPENAI_BASE_URL if you're targeting a compatible proxy)."
+                }
+                crate::backends::BackendName::Anthropic => {
+                    "Check ANTHROPIC_API_KEY (or ANTHROPIC_BASE_URL if you're targeting a compatible proxy)."
                 }
                 crate::backends::BackendName::OpenAiCodex => {
                     "Run `/login openai-codex` to sign in with ChatGPT/Codex."

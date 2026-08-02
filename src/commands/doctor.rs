@@ -80,6 +80,7 @@ async fn cmd_doctor_probe(args: &str, state: &AppState) -> Result<()> {
         let env_name = match state.config.backend {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
             BackendName::OpenAi => "OPENAI_API_KEY",
+            BackendName::Anthropic => "ANTHROPIC_API_KEY",
             BackendName::OpenAiCodex => "ChatGPT login",
             BackendName::Grok => "Grok login",
             _ => "API key",
@@ -971,6 +972,7 @@ fn backend_model_hint(backend_name: BackendName, model: &str) -> String {
         }
         BackendName::Openrouter => "set OPENROUTER_API_KEY before using OpenRouter".into(),
         BackendName::OpenAi => "set OPENAI_API_KEY before using OpenAI".into(),
+        BackendName::Anthropic => "set ANTHROPIC_API_KEY before using Anthropic".into(),
         BackendName::OpenAiCodex => "run /login openai-codex before using ChatGPT/Codex".into(),
         BackendName::Grok => "run /login grok before using SuperGrok / X Premium+".into(),
     }
