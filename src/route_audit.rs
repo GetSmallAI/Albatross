@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backends::BackendName;
 use crate::config::WORKSPACE_SCRATCH_DIR;
-use crate::model_system::{EffortLevel, ModelRef, ModelSystemConfig, RouteDecision};
+use crate::model_system::{
+    EffortLevel, ModelRef, ModelSystemConfig, RouteCandidate, RouteDecision, RoutingPolicy,
+};
 
 static ROUTE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -55,11 +57,15 @@ pub enum RouteLedgerEvent {
         task_preview: String,
         selector: ModelRef,
         #[serde(default)]
+        policy_hash: String,
+        #[serde(default)]
+        candidates: Vec<RouteCandidate>,
+        #[serde(default)]
         model_system: Box<ModelSystemConfig>,
         decision: RouteDecision,
         #[serde(default)]
         orchestrator: Option<ModelRef>,
-        coder: RoutedModelReceipt,
+        coder: Box<RoutedModelReceipt>,
         #[serde(default)]
         reviewer: Box<Option<RoutedReviewReceipt>>,
         #[serde(default)]
@@ -92,6 +98,35 @@ pub enum RouteLedgerEvent {
         duration_ms: u64,
         status: String,
     },
+    RouteOutcome {
+        timestamp: String,
+        route_id: String,
+        session_id: String,
+        outcome: RouteOutcomeStatus,
+        source: String,
+        #[serde(default)]
+        tests_passed: Option<bool>,
+        #[serde(default)]
+        ready_to_ship: Option<bool>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteOutcomeStatus {
+    Pass,
+    Fail,
+}
+
+impl RouteOutcomeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +146,17 @@ pub struct ModelCallInput<'a> {
     pub cost_source: &'a str,
     pub duration_ms: u64,
     pub status: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteOutcomeInput<'a> {
+    pub route_id: &'a str,
+    pub session_id: &'a str,
+    pub outcome: RouteOutcomeStatus,
+    pub source: &'a str,
+    pub tests_passed: Option<bool>,
+    pub ready_to_ship: Option<bool>,
+    pub note: Option<&'a str>,
 }
 
 pub fn ledger_path(workspace_root: &str) -> PathBuf {
@@ -137,6 +183,12 @@ pub fn session_id(session_path: &Path) -> String {
 
 pub fn task_hash(task: &str) -> String {
     let digest = Sha256::digest(task.trim().as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+pub fn policy_hash(policy: &RoutingPolicy) -> String {
+    let bytes = serde_json::to_vec(policy).unwrap_or_default();
+    let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
 }
 
@@ -208,6 +260,19 @@ pub fn model_call_event(input: ModelCallInput<'_>) -> RouteLedgerEvent {
         cost_source: input.cost_source.to_string(),
         duration_ms: input.duration_ms,
         status: input.status.to_string(),
+    }
+}
+
+pub fn route_outcome_event(input: RouteOutcomeInput<'_>) -> RouteLedgerEvent {
+    RouteLedgerEvent::RouteOutcome {
+        timestamp: Utc::now().to_rfc3339(),
+        route_id: input.route_id.to_string(),
+        session_id: input.session_id.to_string(),
+        outcome: input.outcome,
+        source: input.source.to_string(),
+        tests_passed: input.tests_passed,
+        ready_to_ship: input.ready_to_ship,
+        note: input.note.map(str::to_string),
     }
 }
 
@@ -297,6 +362,69 @@ mod tests {
             .unwrap();
         writeln!(file, "not json").unwrap();
         assert_eq!(read_events(root).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn route_outcomes_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let event = route_outcome_event(RouteOutcomeInput {
+            route_id: "route-1",
+            session_id: "session-1",
+            outcome: RouteOutcomeStatus::Pass,
+            source: "manual",
+            tests_passed: Some(true),
+            ready_to_ship: Some(false),
+            note: Some("tests green"),
+        });
+        append_event(root, &event).unwrap();
+        let events = read_events(root).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [RouteLedgerEvent::RouteOutcome {
+                route_id,
+                outcome: RouteOutcomeStatus::Pass,
+                tests_passed: Some(true),
+                ready_to_ship: Some(false),
+                ..
+            }] if route_id == "route-1"
+        ));
+    }
+
+    #[test]
+    fn policy_hash_is_stable_and_changes_with_policy() {
+        let balanced = RoutingPolicy::default();
+        let mut cost = balanced.clone();
+        cost.objective = crate::model_system::RoutingObjective::Cost;
+        assert_eq!(policy_hash(&balanced), policy_hash(&balanced));
+        assert_ne!(policy_hash(&balanced), policy_hash(&cost));
+    }
+
+    #[test]
+    fn old_decision_receipts_default_new_transparency_fields() {
+        let event: RouteLedgerEvent = serde_json::from_value(serde_json::json!({
+            "kind": "routeDecision",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "route_id": "route-old",
+            "session_id": "session-old",
+            "task_hash": "sha256:test",
+            "task_preview": "test",
+            "selector": { "backend": "openrouter", "model": "openrouter/auto" },
+            "decision": { "complexity": "low" },
+            "coder": {
+                "model": { "backend": "ollama", "model": "qwen2.5-coder:7b" }
+            },
+            "applied": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            event,
+            RouteLedgerEvent::RouteDecision {
+                policy_hash,
+                candidates,
+                ..
+            } if policy_hash.is_empty() && candidates.is_empty()
+        ));
     }
 
     #[test]

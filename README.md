@@ -45,9 +45,9 @@ few that aren't usual:
   `openrouter/fusion` alias for deliberative work; `/fusion tool` attaches
   Fusion to a chosen OpenRouter coding model for hard reviews, architecture
   tradeoffs, and high-stakes debugging.
-- **Multi-model routing.** `/route select <task>` asks a configured selector
-  model to pick low/medium/high orchestrator and coder tiers, plus play vs
-  production review and security review, then switches the active coding model.
+- **Transparent multi-model routing.** `/route select <task>` scores every
+  configured coder candidate, estimates cost, applies explicit policy limits,
+  and shows the chosen model, effort, confidence, alternatives, and reasons.
 - **Routed plans.** `/plan route <goal>` asks a configured planner model to
   break work into a low/medium/high task graph, saves it to
   `.albatross/plan.json`, and `/plan execute` runs ready tasks through the
@@ -409,6 +409,10 @@ this exact call`. The session cache resets on `/new`.
 /route explain         explain the latest (or named) route and every linked call
 /route history [N]     show recent durable route decisions
 /route spend           aggregate routed spend by role and resolved model
+/route report          summarize routing decisions, confidence, outcomes, and cost
+/route simulate <task> preview selection without switching the active model
+/route why-not [model] show candidate eligibility, cost estimate, and exclusions
+/route label pass|fail record an outcome for the latest route
 ```
 
 **Memory, capabilities, context**
@@ -939,37 +943,74 @@ template` prints the JSON shape to paste into `agent.config.json`.
 /route template
 /route status
 /route select add OAuth login with token refresh and tests
-/route select --dry-run redesign the settings page
+/route simulate redesign the settings page
+/route why-not gpt-4o
 /route apply coder high
 /route apply review production
 /route apply security
 /route explain
 /route history 20
 /route spend
+/route report
+/route label pass tests and review passed
 ```
 
 `/route select` sends the task plus the configured stack to
-`modelSystem.selector`, expects a JSON decision, prints the selected
-orchestrator/coder/reviewer/security path, and switches the live session to the
-chosen coding model unless `--dry-run` is passed. The selector can also return
-`coderEffort`, `reviewEffort`, and `securityEffort` (`none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, or `max`). The chosen coder effort becomes the
-active session effort, appears in `/session` and the turn footer, and is sent to
-OpenRouter as `reasoning.effort`; local backends ignore unsupported request
-fields while still showing the selected effort.
+`modelSystem.selector`, expects a JSON decision, and prints a candidate
+scoreboard before switching the live session to the chosen coding model. Each
+candidate row exposes eligibility, estimated turn cost, selector score,
+warnings, and policy exclusions. The selected route also shows selector
+confidence, rationale, and any deterministic policy fallback. `/route simulate`
+does the same analysis without changing the active model, while `/route why-not
+[model-or-tier]` inspects policy eligibility without calling the selector.
+
+The selector can return `coderEffort`, `reviewEffort`, and `securityEffort`
+(`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`). The chosen coder
+effort becomes the active session effort, appears in `/session` and the turn
+footer, and is sent to compatible providers. The receipt distinguishes the
+requested effort from the effective provider value; unsupported effort is
+reported instead of silently appearing to have been applied.
+
+Routing policy lives at `modelSystem.policy`:
+
+```json
+{
+  "objective": "balanced",
+  "maxTurnUsd": 0.10,
+  "unknownCost": "warn",
+  "localOnly": false,
+  "minConfidence": 70,
+  "requireEffortSupport": false,
+  "estimatedOutputTokens": 2000
+}
+```
+
+`objective` controls deterministic fallback behavior (`quality`, `cost`, or
+`balanced`). `maxTurnUsd`, `localOnly`, and `unknownCost` can exclude candidates;
+`localOnly` also requires the selector itself to use a local backend so route
+analysis does not send the task to a hosted model. `minConfidence` invokes the
+objective fallback when selector confidence is too low. Cost estimates use the
+local catalog and the configured input/output token assumptions. Models without
+catalog pricing display `$?` and follow `unknownCost`; estimates are a routing
+guardrail, not a provider quote.
 
 Every selection and routed model call is appended to
 `.albatross/routes.jsonl`. Receipts include the candidate-stack snapshot,
-task hash and bounded preview, selector rationale, requested backend/model,
-provider-resolved model and provider when reported, requested versus effective
-effort, tokens, cache usage, latency, cost, and whether cost came from the
-provider, the local catalog, or is unknown. The ledger is project-local and
-gitignored because task previews may be sensitive.
+policy hash, per-candidate scores and exclusions, selector confidence and
+rationale, requested backend/model, provider-resolved model and provider when
+reported, requested versus effective effort, tokens, cache usage, latency,
+cost, and whether cost came from the provider, the local catalog, or is unknown.
+The ledger is project-local and gitignored because task previews may be
+sensitive.
 
 `/route explain [route-id]` renders one complete receipt, `/route history [N]`
 shows recent decisions, and `/route spend` aggregates all recorded calls by
-role and resolved model. Selector and routed-planner costs are included in the
-live session total instead of being displayed as disconnected side costs.
+role and resolved model. `/route label pass|fail [note]` records an outcome for
+the latest decision, and successful or failed automatic test runs add an outcome
+when a route is active. `/route report` summarizes route volume, complexity,
+confidence, outcomes, resolved models, and cost. Selector and routed-planner
+costs are included in the live session total instead of being displayed as
+disconnected side costs.
 
 For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
 or a planner override to create `.albatross/plan.json`; `/plan execute`
@@ -1092,6 +1133,15 @@ For project-level defaults, run `/setup`, use `/backend --default` /
   },
   "modelSystem": {
     "enabled": true,
+    "policy": {
+      "objective": "balanced",
+      "maxTurnUsd": null,
+      "unknownCost": "warn",
+      "localOnly": false,
+      "minConfidence": 70,
+      "requireEffortSupport": false,
+      "estimatedOutputTokens": 2000
+    },
     "planner": {
       "backend": "openrouter",
       "model": "anthropic/claude-opus-4.8",

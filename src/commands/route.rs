@@ -2,14 +2,17 @@
 
 use super::*;
 use crate::model_system::{
-    EffortLevel, ModelRef, ModelSystemConfig, ModelTierSet, ReviewModelSet, ReviewTier,
-    RouteDecision, TaskComplexity,
+    backend_supports_effort, evaluate_coder_candidates, EffortLevel, ModelRef, ModelSystemConfig,
+    ModelTierSet, ReviewModelSet, ReviewTier, RouteCandidate, RouteDecision, RoutingObjective,
+    RoutingPolicy, TaskComplexity,
 };
 use crate::route_audit::{
-    append_event, ledger_path, model_call_event, new_route_id, read_events, session_id, task_hash,
-    task_preview, ActiveRouteContext, ModelCallInput, RouteLedgerEvent, RoutedModelReceipt,
+    append_event, ledger_path, model_call_event, new_route_id, policy_hash, read_events,
+    route_outcome_event, session_id, task_hash, task_preview, ActiveRouteContext, ModelCallInput,
+    RouteLedgerEvent, RouteOutcomeInput, RouteOutcomeStatus, RoutedModelReceipt,
     RoutedReviewReceipt,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,12 @@ enum RouteInvocation {
     History(usize),
     Explain(Option<String>),
     Spend,
+    Report,
+    WhyNot(Option<String>),
+    Label {
+        outcome: RouteOutcomeStatus,
+        note: Option<String>,
+    },
     Apply(RouteApplyTarget),
     Select(RouteSelectArgs),
 }
@@ -61,6 +70,11 @@ pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
         RouteInvocation::History(limit) => print_route_history(state, limit)?,
         RouteInvocation::Explain(route_id) => print_route_explanation(state, route_id.as_deref())?,
         RouteInvocation::Spend => print_route_spend(state)?,
+        RouteInvocation::Report => print_route_report(state)?,
+        RouteInvocation::WhyNot(query) => print_route_candidates(state, query.as_deref())?,
+        RouteInvocation::Label { outcome, note } => {
+            label_latest_route(state, outcome, note.as_deref())?
+        }
         RouteInvocation::Apply(target) => {
             apply_route_target(state, target)?;
         }
@@ -73,7 +87,7 @@ pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
 
 fn route_usage() {
     println!(
-        "  {DIM}Usage: /route status · /route history [N] · /route explain [id] · /route spend · /route template · /route select [--dry-run] <task> · /route apply coder|orchestrator low|medium|high · /route apply review play|production · /route apply security{RESET}"
+        "  {DIM}Usage: /route status · /route history [N] · /route explain [id] · /route spend · /route report · /route why-not [model] · /route label pass|fail [note] · /route simulate <task> · /route template · /route select [--dry-run] <task> · /route apply coder|orchestrator low|medium|high · /route apply review play|production · /route apply security{RESET}"
     );
 }
 
@@ -87,6 +101,35 @@ fn parse_route_args(args: &str) -> Option<RouteInvocation> {
     }
     if trimmed == "spend" || trimmed == "cost" || trimmed == "costs" {
         return Some(RouteInvocation::Spend);
+    }
+    if trimmed == "report" || trimmed == "scorecard" {
+        return Some(RouteInvocation::Report);
+    }
+    if trimmed == "why-not" || trimmed == "candidates" {
+        return Some(RouteInvocation::WhyNot(None));
+    }
+    if let Some(rest) = trimmed.strip_prefix("why-not ") {
+        let query = rest.trim();
+        return (!query.is_empty()).then(|| RouteInvocation::WhyNot(Some(query.to_string())));
+    }
+    if let Some(rest) = trimmed.strip_prefix("label ") {
+        let mut parts = rest.trim().splitn(2, char::is_whitespace);
+        let outcome = match parts.next()? {
+            "pass" | "passed" | "success" => RouteOutcomeStatus::Pass,
+            "fail" | "failed" | "failure" => RouteOutcomeStatus::Fail,
+            _ => return None,
+        };
+        let note = parts
+            .next()
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .map(str::to_string);
+        return Some(RouteInvocation::Label { outcome, note });
+    }
+    if let Some(rest) = trimmed.strip_prefix("simulate") {
+        let mut args = parse_select_args(rest.trim())?;
+        args.apply = false;
+        return Some(RouteInvocation::Select(args));
     }
     if trimmed == "history" {
         return Some(RouteInvocation::History(10));
@@ -204,6 +247,26 @@ fn print_route_status(stack: &ModelSystemConfig) {
     print_tier_set("coder", &stack.coders);
     print_review_set("review", &stack.reviewers);
     print_model_ref("security", stack.security_reviewer.as_ref());
+    println!(
+        "  {DIM}policy{RESET}            {} · unknown-cost={}{}{}{}",
+        stack.policy.objective.as_str(),
+        stack.policy.unknown_cost.as_str(),
+        stack
+            .policy
+            .max_turn_usd
+            .map(|cap| format!(" · max-turn={}", catalog::format_usd(cap)))
+            .unwrap_or_default(),
+        stack
+            .policy
+            .min_confidence
+            .map(|confidence| format!(" · min-confidence={confidence}%"))
+            .unwrap_or_default(),
+        if stack.policy.local_only {
+            " · local-only"
+        } else {
+            ""
+        }
+    );
 }
 
 fn print_route_history(state: &AppState, limit: usize) -> Result<()> {
@@ -263,6 +326,8 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
         task_hash,
         task_preview,
         selector,
+        policy_hash,
+        candidates,
         model_system,
         decision,
         orchestrator,
@@ -281,8 +346,13 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
     println!("  {DIM}task{RESET}              {task_preview}");
     println!("  {DIM}task hash{RESET}         {task_hash}");
     println!("  {DIM}selector{RESET}          {}", selector.detail());
+    println!("  {DIM}policy hash{RESET}       {policy_hash}");
     println!("  {DIM}candidate snapshot{RESET}");
-    print_route_status(model_system);
+    if candidates.is_empty() {
+        print_route_status(model_system);
+    } else {
+        print_candidate_scoreboard(candidates, Some(decision.complexity));
+    }
     println!(
         "  {DIM}decision{RESET}          {} · {}",
         decision.complexity.as_str(),
@@ -290,6 +360,12 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
     );
     if let Some(reason) = decision.reason.as_deref() {
         println!("  {DIM}reason{RESET}            {reason}");
+    }
+    if let Some(confidence) = decision.confidence {
+        println!("  {DIM}confidence{RESET}        {confidence}%");
+    }
+    for adjustment in &decision.policy_adjustments {
+        println!("  {DIM}policy adjustment{RESET} {adjustment}");
     }
     if let Some(model) = orchestrator {
         println!("  {DIM}orchestrator{RESET}      {}", model.detail());
@@ -381,6 +457,37 @@ fn print_route_explanation(state: &AppState, requested_id: Option<&str>) -> Resu
             String::new()
         }
     );
+    if let Some(RouteLedgerEvent::RouteOutcome {
+        outcome,
+        source,
+        tests_passed,
+        ready_to_ship,
+        note,
+        ..
+    }) = events.iter().rev().find(|event| {
+        matches!(event, RouteLedgerEvent::RouteOutcome { route_id: id, .. } if id == route_id)
+    }) {
+        println!(
+            "  {DIM}latest outcome{RESET}    {} · {source}",
+            outcome.as_str()
+        );
+        if tests_passed.is_some() || ready_to_ship.is_some() {
+            println!(
+                "    {DIM}tests={} · ready-to-ship={}{RESET}",
+                tests_passed
+                    .map(|passed| if passed { "pass" } else { "fail" })
+                    .unwrap_or("unknown"),
+                ready_to_ship
+                    .map(|ready| if ready { "yes" } else { "no" })
+                    .unwrap_or("unknown")
+            );
+        }
+        if let Some(note) = note {
+            println!("    {DIM}{note}{RESET}");
+        }
+    } else {
+        println!("  {DIM}latest outcome{RESET}    unlabeled");
+    }
     println!(
         "  {DIM}ledger{RESET}            {}",
         ledger_path(&state.config.workspace_root).display()
@@ -460,6 +567,258 @@ fn print_route_spend(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct RouteReportSummary {
+    decisions: usize,
+    applied: usize,
+    passed: usize,
+    failed: usize,
+    unlabeled: usize,
+    total_cost_usd: f64,
+    unknown_cost_calls: usize,
+    confidence_total: u64,
+    confidence_count: usize,
+    by_complexity: BTreeMap<String, usize>,
+    by_model: BTreeMap<String, (usize, f64, usize)>,
+}
+
+fn summarize_route_events(events: &[RouteLedgerEvent]) -> RouteReportSummary {
+    let mut summary = RouteReportSummary::default();
+    let mut route_ids = BTreeSet::new();
+    let mut outcomes = BTreeMap::new();
+    for event in events {
+        match event {
+            RouteLedgerEvent::RouteDecision {
+                route_id,
+                decision,
+                applied,
+                ..
+            } => {
+                summary.decisions += 1;
+                summary.applied += usize::from(*applied);
+                route_ids.insert(route_id.clone());
+                *summary
+                    .by_complexity
+                    .entry(decision.complexity.as_str().into())
+                    .or_default() += 1;
+                if let Some(confidence) = decision.confidence {
+                    summary.confidence_total += u64::from(confidence);
+                    summary.confidence_count += 1;
+                }
+            }
+            RouteLedgerEvent::ModelCall {
+                route_id: Some(_),
+                requested_backend,
+                requested_model,
+                actual_model,
+                cost_usd,
+                ..
+            } => {
+                let label = actual_model.clone().unwrap_or_else(|| {
+                    format!("{}:{}", requested_backend.as_str(), requested_model)
+                });
+                let entry = summary.by_model.entry(label).or_default();
+                entry.0 += 1;
+                match cost_usd {
+                    Some(cost) => {
+                        entry.1 += cost;
+                        summary.total_cost_usd += cost;
+                    }
+                    None => {
+                        entry.2 += 1;
+                        summary.unknown_cost_calls += 1;
+                    }
+                }
+            }
+            RouteLedgerEvent::RouteOutcome {
+                route_id, outcome, ..
+            } => {
+                outcomes.insert(route_id.clone(), *outcome);
+            }
+            _ => {}
+        }
+    }
+    for route_id in route_ids {
+        match outcomes.get(&route_id) {
+            Some(RouteOutcomeStatus::Pass) => summary.passed += 1,
+            Some(RouteOutcomeStatus::Fail) => summary.failed += 1,
+            None => summary.unlabeled += 1,
+        }
+    }
+    summary
+}
+
+fn print_route_report(state: &AppState) -> Result<()> {
+    let events = read_events(&state.config.workspace_root)?;
+    let summary = summarize_route_events(&events);
+    if summary.decisions == 0 {
+        println!("  {DIM}No route decisions recorded yet.{RESET}");
+        return Ok(());
+    }
+    println!("  {DIM}routing report{RESET}");
+    println!(
+        "  {DIM}decisions{RESET}         {} · {} applied",
+        summary.decisions, summary.applied
+    );
+    println!(
+        "  {DIM}outcomes{RESET}          {} pass · {} fail · {} unlabeled",
+        summary.passed, summary.failed, summary.unlabeled
+    );
+    if summary.confidence_count > 0 {
+        println!(
+            "  {DIM}avg confidence{RESET}    {}%",
+            summary.confidence_total / summary.confidence_count as u64
+        );
+    }
+    println!("  {DIM}complexity mix{RESET}");
+    for (complexity, count) in summary.by_complexity {
+        println!("    {complexity:<8} {count}");
+    }
+    println!("  {DIM}resolved models{RESET}");
+    for (model, (calls, cost, unknown)) in summary.by_model {
+        println!(
+            "    {model:<32} {calls} call(s) · {}{}",
+            if unknown > 0 { "≥" } else { "" },
+            catalog::format_usd(cost)
+        );
+    }
+    println!(
+        "  {DIM}routed cost{RESET}       {}{}",
+        if summary.unknown_cost_calls > 0 {
+            "≥"
+        } else {
+            ""
+        },
+        catalog::format_usd(summary.total_cost_usd)
+    );
+    println!(
+        "  {DIM}ledger{RESET}            {}",
+        ledger_path(&state.config.workspace_root).display()
+    );
+    Ok(())
+}
+
+fn label_latest_route(
+    state: &AppState,
+    outcome: RouteOutcomeStatus,
+    note: Option<&str>,
+) -> Result<()> {
+    let events = read_events(&state.config.workspace_root)?;
+    let Some(route_id) = events.iter().rev().find_map(|event| match event {
+        RouteLedgerEvent::RouteDecision { route_id, .. } => Some(route_id.as_str()),
+        _ => None,
+    }) else {
+        println!("  {DIM}No route decision is available to label.{RESET}");
+        return Ok(());
+    };
+    let event = route_outcome_event(RouteOutcomeInput {
+        route_id,
+        session_id: &session_id(&state.session_path),
+        outcome,
+        source: "manual",
+        tests_passed: None,
+        ready_to_ship: None,
+        note,
+    });
+    append_event(&state.config.workspace_root, &event)?;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}route outcome recorded:{RESET} {CYAN}{}{RESET} · {}",
+        route_id,
+        outcome.as_str()
+    );
+    Ok(())
+}
+
+fn estimated_route_input_tokens(state: &AppState, task: &str) -> u32 {
+    const ROUTING_OVERHEAD_TOKENS: usize = 1_500;
+    let transcript_bytes = state
+        .messages
+        .iter()
+        .map(|message| {
+            serde_json::to_vec(message)
+                .map(|value| value.len())
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    let tokens = crate::budget::estimate_tokens(transcript_bytes.saturating_add(task.len()))
+        .saturating_add(ROUTING_OVERHEAD_TOKENS);
+    u32::try_from(tokens).unwrap_or(u32::MAX)
+}
+
+fn current_route_task(state: &AppState) -> String {
+    state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| message.user_text())
+        .map(|text| text.into_owned())
+        .unwrap_or_else(|| "routing preview".into())
+}
+
+fn current_candidates(state: &AppState, task: &str) -> Vec<RouteCandidate> {
+    evaluate_coder_candidates(
+        &state.config.model_system.coders,
+        &state.config.model_system.policy,
+        estimated_route_input_tokens(state, task),
+    )
+}
+
+fn print_candidate_scoreboard(candidates: &[RouteCandidate], selected: Option<TaskComplexity>) {
+    for candidate in candidates {
+        let marker = if selected == Some(candidate.complexity) {
+            "→"
+        } else {
+            " "
+        };
+        let score = candidate
+            .selector_score
+            .map(|score| format!(" · score={score}"))
+            .unwrap_or_default();
+        println!(
+            "    {marker} {:<6} {}{score}",
+            candidate.complexity.as_str(),
+            candidate.detail()
+        );
+        for reason in &candidate.exclusions {
+            println!("        {RED}excluded:{RESET} {reason}");
+        }
+        for warning in &candidate.warnings {
+            println!("        {YELLOW}warning:{RESET} {warning}");
+        }
+    }
+}
+
+fn print_route_candidates(state: &AppState, query: Option<&str>) -> Result<()> {
+    let task = current_route_task(state);
+    let candidates = current_candidates(state, &task);
+    let filtered = candidates
+        .iter()
+        .filter(|candidate| {
+            query.is_none_or(|query| {
+                let query = query.to_ascii_lowercase();
+                candidate
+                    .model
+                    .label()
+                    .to_ascii_lowercase()
+                    .contains(&query)
+                    || candidate.complexity.as_str().contains(&query)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        println!("  {DIM}No configured coder candidate matches that query.{RESET}");
+        return Ok(());
+    }
+    println!(
+        "  {DIM}candidate policy{RESET}  {} · hash={}",
+        state.config.model_system.policy.objective.as_str(),
+        policy_hash(&state.config.model_system.policy)
+    );
+    print_candidate_scoreboard(&filtered, None);
+    Ok(())
+}
+
 fn print_model_ref(label: &str, model: Option<&ModelRef>) {
     match model {
         Some(model) => println!("  {DIM}{label:<18}{RESET} {}", model.detail()),
@@ -484,6 +843,15 @@ fn print_route_template() {
 {{
   "modelSystem": {{
     "enabled": true,
+    "policy": {{
+      "objective": "balanced",
+      "maxTurnUsd": null,
+      "unknownCost": "warn",
+      "localOnly": false,
+      "minConfidence": 70,
+      "requireEffortSupport": false,
+      "estimatedOutputTokens": 2000
+    }},
     "planner": {{
       "backend": "openrouter",
       "model": "anthropic/claude-opus-4.8",
@@ -563,6 +931,14 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
         println!("  {RED}✗{RESET} {DIM}modelSystem.selector is required for /route select.{RESET}");
         return Ok(());
     };
+    if let Err(error) = validate_routing_policy(&state.config.model_system.policy) {
+        println!("  {RED}✗{RESET} {DIM}{error}{RESET}");
+        return Ok(());
+    }
+    if let Err(error) = validate_selector_policy(&selector, &state.config.model_system.policy) {
+        println!("  {RED}✗{RESET} {DIM}{error}{RESET}");
+        return Ok(());
+    }
     let task = match args.task {
         Some(task) => task,
         None => match state.messages.iter().rev().find_map(|m| m.user_text()) {
@@ -575,15 +951,43 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
     };
 
     let route_id = new_route_id();
+    let mut candidates = current_candidates(state, &task);
+    if !candidates.iter().any(|candidate| candidate.eligible) {
+        println!(
+            "  {RED}✗{RESET} {DIM}routing policy excluded every configured coder. Run /route why-not for details.{RESET}"
+        );
+        print_candidate_scoreboard(&candidates, None);
+        return Ok(());
+    }
     println!("  {DIM}route id{RESET}          {CYAN}{route_id}{RESET}");
     println!("  {DIM}selector{RESET}          {}", selector.detail());
-    let decision = match run_selector(state, &selector, &task, &route_id).await {
+    println!(
+        "  {DIM}policy{RESET}            {} · {}",
+        state.config.model_system.policy.objective.as_str(),
+        policy_hash(&state.config.model_system.policy)
+    );
+    let mut decision = match run_selector(state, &selector, &task, &route_id, &candidates).await {
         Ok(decision) => decision,
         Err(e) => {
             println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
             return Ok(());
         }
     };
+    for candidate in &mut candidates {
+        candidate.selector_score = decision
+            .candidate_scores
+            .get(candidate.complexity.as_str())
+            .copied();
+    }
+    if let Err(error) = enforce_routing_policy(
+        &mut decision,
+        &mut candidates,
+        &state.config.model_system.policy,
+    ) {
+        println!("  {RED}✗{RESET} {DIM}{error}{RESET}");
+        print_candidate_scoreboard(&candidates, Some(decision.complexity));
+        return Ok(());
+    }
     let route = match resolve_route(&state.config.model_system, &decision) {
         Ok(route) => route,
         Err(e) => {
@@ -613,9 +1017,17 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
         "  {DIM}complexity{RESET}        {CYAN}{}{RESET}",
         decision.complexity.as_str()
     );
+    if let Some(confidence) = decision.confidence {
+        println!("  {DIM}confidence{RESET}        {confidence}%");
+    }
     if let Some(reason) = decision.reason.as_deref().filter(|s| !s.trim().is_empty()) {
         println!("  {DIM}reason{RESET}            {}", reason.trim());
     }
+    for adjustment in &decision.policy_adjustments {
+        println!("  {DIM}policy adjustment{RESET} {adjustment}");
+    }
+    println!("  {DIM}candidates{RESET}");
+    print_candidate_scoreboard(&candidates, Some(decision.complexity));
     if let Some(orchestrator) = route.orchestrator {
         println!("  {DIM}orchestrator{RESET}      {}", orchestrator.detail());
     }
@@ -676,10 +1088,12 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
         task_hash: task_hash(&task),
         task_preview: task_preview(&task),
         selector,
+        policy_hash: policy_hash(&state.config.model_system.policy),
+        candidates,
         model_system: Box::new(state.config.model_system.clone()),
         decision,
         orchestrator: selected_orchestrator,
-        coder: selected_coder,
+        coder: Box::new(selected_coder),
         reviewer: Box::new(selected_reviewer),
         security: Box::new(selected_security),
         applied,
@@ -724,18 +1138,173 @@ fn resolve_route<'a>(
     })
 }
 
+fn complexity_rank(complexity: TaskComplexity) -> u8 {
+    match complexity {
+        TaskComplexity::Low => 0,
+        TaskComplexity::Medium => 1,
+        TaskComplexity::High => 2,
+    }
+}
+
+fn validate_routing_policy(policy: &RoutingPolicy) -> Result<()> {
+    if policy.min_confidence.is_some_and(|minimum| minimum > 100) {
+        return Err(anyhow!(
+            "routing policy minConfidence must be between 0 and 100"
+        ));
+    }
+    if policy
+        .max_turn_usd
+        .is_some_and(|cap| !cap.is_finite() || cap < 0.0)
+    {
+        return Err(anyhow!(
+            "routing policy maxTurnUsd must be a finite, non-negative number"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_selector_policy(selector: &ModelRef, policy: &RoutingPolicy) -> Result<()> {
+    if policy.local_only && !selector.backend.is_local() {
+        return Err(anyhow!(
+            "routing policy localOnly requires a local selector; {} is hosted",
+            selector.label()
+        ));
+    }
+    if policy.require_effort_support
+        && selector
+            .effort
+            .is_some_and(|effort| effort != EffortLevel::None)
+        && !backend_supports_effort(selector.backend)
+    {
+        return Err(anyhow!(
+            "routing policy requires effort support, but selector {} cannot apply effort",
+            selector.label()
+        ));
+    }
+    Ok(())
+}
+
+fn policy_fallback(
+    candidates: &[RouteCandidate],
+    objective: RoutingObjective,
+) -> Option<&RouteCandidate> {
+    let eligible = candidates
+        .iter()
+        .filter(|candidate| candidate.eligible)
+        .collect::<Vec<_>>();
+    match objective {
+        RoutingObjective::Quality => eligible
+            .into_iter()
+            .max_by_key(|candidate| complexity_rank(candidate.complexity)),
+        RoutingObjective::Cost => eligible.into_iter().min_by(|left, right| {
+            match (left.estimated_cost_usd, right.estimated_cost_usd) {
+                (Some(left_cost), Some(right_cost)) => left_cost
+                    .partial_cmp(&right_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        complexity_rank(left.complexity).cmp(&complexity_rank(right.complexity))
+                    }),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => {
+                    complexity_rank(left.complexity).cmp(&complexity_rank(right.complexity))
+                }
+            }
+        }),
+        RoutingObjective::Balanced => [
+            TaskComplexity::Medium,
+            TaskComplexity::High,
+            TaskComplexity::Low,
+        ]
+        .into_iter()
+        .find_map(|complexity| {
+            eligible
+                .iter()
+                .copied()
+                .find(|candidate| candidate.complexity == complexity)
+        }),
+    }
+}
+
+fn enforce_routing_policy(
+    decision: &mut RouteDecision,
+    candidates: &mut [RouteCandidate],
+    policy: &RoutingPolicy,
+) -> Result<()> {
+    validate_routing_policy(policy)?;
+    if let Some(confidence) = decision.confidence {
+        if confidence > 100 {
+            return Err(anyhow!("selector confidence must be between 0 and 100"));
+        }
+    }
+
+    let requested_effort = decision
+        .coder_effort
+        .filter(|effort| *effort != EffortLevel::None);
+    if policy.require_effort_support && requested_effort.is_some() {
+        for candidate in candidates.iter_mut() {
+            if !backend_supports_effort(candidate.model.backend) {
+                let reason = format!(
+                    "{} cannot apply selector-requested effort {}",
+                    candidate.model.backend.as_str(),
+                    requested_effort
+                        .map(|effort| effort.as_str())
+                        .unwrap_or("none")
+                );
+                if !candidate.exclusions.contains(&reason) {
+                    candidate.exclusions.push(reason);
+                }
+                candidate.eligible = false;
+            }
+        }
+    }
+
+    let original = decision.complexity;
+    let selected_eligible = candidates
+        .iter()
+        .find(|candidate| candidate.complexity == original)
+        .is_some_and(|candidate| candidate.eligible);
+    let below_confidence = policy
+        .min_confidence
+        .is_some_and(|minimum| decision.confidence.unwrap_or_default() < minimum);
+    if selected_eligible && !below_confidence {
+        return Ok(());
+    }
+
+    let fallback = policy_fallback(candidates, policy.objective)
+        .ok_or_else(|| anyhow!("routing policy excluded every candidate after selector output"))?;
+    let cause = if !selected_eligible {
+        "selected candidate was excluded by policy".to_string()
+    } else {
+        format!(
+            "selector confidence {}% was below the {}% policy minimum",
+            decision.confidence.unwrap_or_default(),
+            policy.min_confidence.unwrap_or_default()
+        )
+    };
+    decision.policy_adjustments.push(format!(
+        "{cause}; {} → {} ({})",
+        original.as_str(),
+        fallback.complexity.as_str(),
+        policy.objective.as_str()
+    ));
+    decision.complexity = fallback.complexity;
+    Ok(())
+}
+
 async fn run_selector(
     state: &mut AppState,
     selector: &ModelRef,
     task: &str,
     route_id: &str,
+    candidates: &[RouteCandidate],
 ) -> Result<RouteDecision> {
     let backend_desc = state.config.backend_descriptor_for(selector.backend);
     if let Err(e) = validate(&backend_desc) {
         return Err(anyhow!("selector backend is not ready: {e}"));
     }
     let system = selector_system_prompt();
-    let user = render_selector_prompt(&state.config.model_system, task);
+    let user = render_selector_prompt(&state.config.model_system, task, candidates);
     let messages = vec![
         ChatMessage::System { content: system },
         ChatMessage::User {
@@ -845,10 +1414,14 @@ async fn run_selector(
 }
 
 fn selector_system_prompt() -> String {
-    "You route coding tasks across a Albatross model system. Return ONLY one JSON object with this exact shape: {\"complexity\":\"low|medium|high\",\"coderEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"review\":\"play|production|null\",\"reviewEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"securityReview\":true|false,\"securityEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"reason\":\"short reason\"}. Choose low complexity for simple edits and small fixes, medium for multi-file feature work, high for ambiguous architecture, long-horizon, reliability-sensitive, or high-risk work. Choose higher coder effort for uncertain implementation, broad refactors, concurrency, migrations, or failing tests. Choose production review for release-quality or production-grade code, play review for prototypes/MVPs/demos, and securityReview=true for auth, secrets, crypto, permissions, dependency, infra, data-safety, or supply-chain risk. Use max or xhigh effort only when deeper reasoning is worth extra latency/cost. Do not include markdown.".into()
+    "You route coding tasks across an Albatross model system. Return ONLY one JSON object with this exact shape: {\"complexity\":\"low|medium|high\",\"coderEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"review\":\"play|production|null\",\"reviewEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"securityReview\":true|false,\"securityEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"confidence\":0-100,\"candidateScores\":{\"low\":0-100,\"medium\":0-100,\"high\":0-100},\"reason\":\"short reason\"}. Never choose a candidate marked excluded. Score each configured candidate for this task even when excluded. Choose low complexity for simple edits and small fixes, medium for multi-file feature work, high for ambiguous architecture, long-horizon, reliability-sensitive, or high-risk work. Choose higher coder effort for uncertain implementation, broad refactors, concurrency, migrations, or failing tests. Choose production review for release-quality or production-grade code, play review for prototypes/MVPs/demos, and securityReview=true for auth, secrets, crypto, permissions, dependency, infra, data-safety, or supply-chain risk. Use max or xhigh effort only when deeper reasoning is worth extra latency/cost. Do not include markdown.".into()
 }
 
-fn render_selector_prompt(stack: &ModelSystemConfig, task: &str) -> String {
+fn render_selector_prompt(
+    stack: &ModelSystemConfig,
+    task: &str,
+    candidates: &[RouteCandidate],
+) -> String {
     let mut out = String::new();
     out.push_str("Route this task using only the configured model system.\n\nTask:\n");
     out.push_str(task.trim());
@@ -880,6 +1453,33 @@ fn render_selector_prompt(stack: &ModelSystemConfig, task: &str) -> String {
         stack.reviewers.production.as_ref(),
     );
     append_model_line(&mut out, "security", stack.security_reviewer.as_ref());
+    out.push_str("\nPolicy-evaluated coder candidates:\n");
+    for candidate in candidates {
+        let cost = candidate
+            .estimated_cost_usd
+            .map(catalog::format_usd)
+            .unwrap_or_else(|| "$?".into());
+        let state = if candidate.eligible {
+            "eligible"
+        } else {
+            "excluded"
+        };
+        out.push_str(&format!(
+            "- {}: {} · {state} · estimated cost {cost}",
+            candidate.complexity.as_str(),
+            candidate.model.detail_with_effort(None)
+        ));
+        if !candidate.exclusions.is_empty() {
+            out.push_str(&format!(
+                " · exclusions: {}",
+                candidate.exclusions.join("; ")
+            ));
+        }
+        if !candidate.warnings.is_empty() {
+            out.push_str(&format!(" · warnings: {}", candidate.warnings.join("; ")));
+        }
+        out.push('\n');
+    }
     out
 }
 
@@ -952,6 +1552,30 @@ fn route_decision_from_value(value: &serde_json::Value) -> Result<RouteDecision>
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let security_effort = parse_effort_field(obj, &["securityEffort", "security_effort"])?;
+    let confidence = obj
+        .get("confidence")
+        .filter(|value| !value.is_null())
+        .map(|value| parse_score_value(value, "confidence"))
+        .transpose()?;
+    let mut candidate_scores = BTreeMap::new();
+    if let Some(value) = obj
+        .get("candidateScores")
+        .or_else(|| obj.get("candidate_scores"))
+        .filter(|value| !value.is_null())
+    {
+        let scores = value
+            .as_object()
+            .ok_or_else(|| anyhow!("selector candidateScores must be a JSON object"))?;
+        for (tier, value) in scores {
+            let normalized = tier.trim().to_ascii_lowercase();
+            if TaskComplexity::parse(&normalized).is_none() {
+                return Err(anyhow!(
+                    "selector candidateScores keys must be low, medium, or high"
+                ));
+            }
+            candidate_scores.insert(normalized, parse_score_value(value, "candidate score")?);
+        }
+    }
     Ok(RouteDecision {
         complexity,
         coder_effort,
@@ -960,7 +1584,32 @@ fn route_decision_from_value(value: &serde_json::Value) -> Result<RouteDecision>
         security_review,
         security_effort,
         reason,
+        confidence,
+        candidate_scores,
+        policy_adjustments: Vec::new(),
     })
+}
+
+fn parse_score_value(value: &serde_json::Value, label: &str) -> Result<u8> {
+    if let Some(value) = value.as_u64() {
+        return u8::try_from(value)
+            .ok()
+            .filter(|value| *value <= 100)
+            .ok_or_else(|| anyhow!("selector {label} must be between 0 and 100"));
+    }
+    if let Some(value) = value.as_f64() {
+        let percentage = if (0.0..=1.0).contains(&value) {
+            (value * 100.0).round()
+        } else {
+            value.round()
+        };
+        if (0.0..=100.0).contains(&percentage) {
+            return Ok(percentage as u8);
+        }
+    }
+    Err(anyhow!(
+        "selector {label} must be a number between 0 and 100"
+    ))
 }
 
 fn parse_effort_field(
@@ -1109,6 +1758,25 @@ mod tests {
             Some(RouteInvocation::History(25))
         );
         assert_eq!(parse_route_args("spend"), Some(RouteInvocation::Spend));
+        assert_eq!(parse_route_args("report"), Some(RouteInvocation::Report));
+        assert_eq!(
+            parse_route_args("why-not gpt-4o"),
+            Some(RouteInvocation::WhyNot(Some("gpt-4o".into())))
+        );
+        assert_eq!(
+            parse_route_args("simulate risky refactor"),
+            Some(RouteInvocation::Select(RouteSelectArgs {
+                apply: false,
+                task: Some("risky refactor".into())
+            }))
+        );
+        assert_eq!(
+            parse_route_args("label fail regression in auth"),
+            Some(RouteInvocation::Label {
+                outcome: RouteOutcomeStatus::Fail,
+                note: Some("regression in auth".into())
+            })
+        );
         assert_eq!(
             parse_route_args("explain route-123"),
             Some(RouteInvocation::Explain(Some("route-123".into())))
@@ -1130,7 +1798,7 @@ mod tests {
     #[test]
     fn parses_route_decision_tolerates_selector_variants() {
         let decision = parse_route_decision(
-            r#"{"complexity":"High","coderEffort":"MAX","review":"none","securityReview":"yes","securityEffort":"x-high","reason":"  risky  "}"#,
+            r#"{"complexity":"High","coderEffort":"MAX","review":"none","securityReview":"yes","securityEffort":"x-high","reason":"  risky  ","confidence":0.82,"candidateScores":{"low":42,"medium":0.71,"high":91}}"#,
         )
         .unwrap();
         assert_eq!(decision.complexity, TaskComplexity::High);
@@ -1139,6 +1807,169 @@ mod tests {
         assert!(decision.security_review);
         assert_eq!(decision.security_effort, Some(EffortLevel::XHigh));
         assert_eq!(decision.reason.as_deref(), Some("risky"));
+        assert_eq!(decision.confidence, Some(82));
+        assert_eq!(decision.candidate_scores.get("medium"), Some(&71));
+        assert_eq!(decision.candidate_scores.get("high"), Some(&91));
+    }
+
+    fn test_candidate(
+        complexity: TaskComplexity,
+        cost: Option<f64>,
+        eligible: bool,
+    ) -> RouteCandidate {
+        RouteCandidate {
+            complexity,
+            model: ModelRef::parse_spec(match complexity {
+                TaskComplexity::Low => "ollama:low",
+                TaskComplexity::Medium => "openai:gpt-4o-mini",
+                TaskComplexity::High => "openai:gpt-4o",
+            })
+            .unwrap(),
+            eligible,
+            estimated_input_tokens: 1_000,
+            estimated_output_tokens: 2_000,
+            estimated_cost_usd: cost,
+            selector_score: None,
+            exclusions: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn test_decision(complexity: TaskComplexity, confidence: Option<u8>) -> RouteDecision {
+        RouteDecision {
+            complexity,
+            coder_effort: None,
+            review: None,
+            review_effort: None,
+            security_review: false,
+            security_effort: None,
+            reason: None,
+            confidence,
+            candidate_scores: BTreeMap::new(),
+            policy_adjustments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn policy_replaces_an_excluded_selection_by_objective() {
+        let mut candidates = vec![
+            test_candidate(TaskComplexity::Low, Some(0.0), false),
+            test_candidate(TaskComplexity::Medium, Some(0.01), true),
+            test_candidate(TaskComplexity::High, Some(0.05), true),
+        ];
+        let mut decision = test_decision(TaskComplexity::Low, Some(95));
+        let policy = RoutingPolicy {
+            objective: RoutingObjective::Quality,
+            ..Default::default()
+        };
+        enforce_routing_policy(&mut decision, &mut candidates, &policy).unwrap();
+        assert_eq!(decision.complexity, TaskComplexity::High);
+        assert!(decision.policy_adjustments[0].contains("excluded"));
+    }
+
+    #[test]
+    fn policy_replaces_low_confidence_selection() {
+        let mut candidates = vec![
+            test_candidate(TaskComplexity::Low, Some(0.0), true),
+            test_candidate(TaskComplexity::Medium, Some(0.01), true),
+            test_candidate(TaskComplexity::High, Some(0.05), true),
+        ];
+        let mut decision = test_decision(TaskComplexity::High, Some(55));
+        let policy = RoutingPolicy {
+            min_confidence: Some(70),
+            ..Default::default()
+        };
+        enforce_routing_policy(&mut decision, &mut candidates, &policy).unwrap();
+        assert_eq!(decision.complexity, TaskComplexity::Medium);
+        assert!(decision.policy_adjustments[0].contains("55%"));
+    }
+
+    #[test]
+    fn local_only_policy_rejects_a_hosted_selector() {
+        let selector = ModelRef::parse_spec("openrouter:openrouter/fusion").unwrap();
+        let policy = RoutingPolicy {
+            local_only: true,
+            ..Default::default()
+        };
+        let error = validate_selector_policy(&selector, &policy).unwrap_err();
+        assert!(error.to_string().contains("requires a local selector"));
+    }
+
+    #[test]
+    fn invalid_policy_is_rejected_before_selection() {
+        let policy = RoutingPolicy {
+            min_confidence: Some(101),
+            ..Default::default()
+        };
+        assert!(validate_routing_policy(&policy).is_err());
+        let policy = RoutingPolicy {
+            max_turn_usd: Some(-0.01),
+            ..Default::default()
+        };
+        assert!(validate_routing_policy(&policy).is_err());
+    }
+
+    #[test]
+    fn report_uses_latest_outcome_and_routed_costs() {
+        let decision: RouteLedgerEvent = serde_json::from_value(serde_json::json!({
+            "kind": "routeDecision",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "route_id": "route-1",
+            "session_id": "session-1",
+            "task_hash": "sha256:test",
+            "task_preview": "test",
+            "selector": { "backend": "openrouter", "model": "openrouter/auto" },
+            "decision": { "complexity": "high", "confidence": 80 },
+            "coder": {
+                "model": { "backend": "open-ai", "model": "gpt-4o" }
+            },
+            "applied": true
+        }))
+        .unwrap();
+        let call = model_call_event(ModelCallInput {
+            route_id: Some("route-1"),
+            session_id: "session-1",
+            role: "coder",
+            backend: BackendName::OpenAi,
+            requested_model: "gpt-4o",
+            actual_model: Some("gpt-4o-2026-01-01"),
+            provider: Some("openai"),
+            requested_effort: Some(EffortLevel::High),
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_input_tokens: 0,
+            cost_usd: Some(0.02),
+            cost_source: "provider-reported",
+            duration_ms: 123,
+            status: "ok",
+        });
+        let failed = route_outcome_event(RouteOutcomeInput {
+            route_id: "route-1",
+            session_id: "session-1",
+            outcome: RouteOutcomeStatus::Fail,
+            source: "auto-test",
+            tests_passed: Some(false),
+            ready_to_ship: Some(false),
+            note: None,
+        });
+        let passed = route_outcome_event(RouteOutcomeInput {
+            route_id: "route-1",
+            session_id: "session-1",
+            outcome: RouteOutcomeStatus::Pass,
+            source: "manual",
+            tests_passed: None,
+            ready_to_ship: None,
+            note: Some("fixed"),
+        });
+        let summary = summarize_route_events(&[decision, call, failed, passed]);
+        assert_eq!(summary.decisions, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.unlabeled, 0);
+        assert_eq!(summary.confidence_total, 80);
+        assert_eq!(summary.total_cost_usd, 0.02);
+        assert_eq!(summary.by_model["gpt-4o-2026-01-01"].0, 1);
     }
 
     #[test]
@@ -1168,6 +1999,9 @@ mod tests {
             security_review: true,
             security_effort: Some(EffortLevel::Max),
             reason: None,
+            confidence: None,
+            candidate_scores: BTreeMap::new(),
+            policy_adjustments: Vec::new(),
         };
         let route = resolve_route(&stack, &decision).unwrap();
         assert_eq!(route.coder.model, "anthropic/claude-sonnet-4.5");

@@ -1669,6 +1669,12 @@ mod tests {
             r#"{
               "modelSystem": {
                 "enabled": true,
+                "policy": {
+                  "objective": "cost",
+                  "maxTurnUsd": 0.05,
+                  "unknownCost": "deny",
+                  "minConfidence": 80
+                },
                 "selector": {
                   "backend": "openrouter",
                   "model": "openrouter/fusion",
@@ -1699,6 +1705,16 @@ mod tests {
         .unwrap();
         let stack = file.model_system.unwrap();
         assert!(stack.enabled);
+        assert_eq!(
+            stack.policy.objective,
+            crate::model_system::RoutingObjective::Cost
+        );
+        assert_eq!(stack.policy.max_turn_usd, Some(0.05));
+        assert_eq!(
+            stack.policy.unknown_cost,
+            crate::model_system::UnknownCostPolicy::Deny
+        );
+        assert_eq!(stack.policy.min_confidence, Some(80));
         assert_eq!(
             stack
                 .coders

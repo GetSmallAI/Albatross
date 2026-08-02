@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::backends::BackendName;
+use crate::catalog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -226,7 +229,194 @@ impl ReviewModelSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingObjective {
+    Quality,
+    Cost,
+    #[default]
+    Balanced,
+}
+
+impl RoutingObjective {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Quality => "quality",
+            Self::Cost => "cost",
+            Self::Balanced => "balanced",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UnknownCostPolicy {
+    Allow,
+    #[default]
+    Warn,
+    Deny,
+}
+
+impl UnknownCostPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+fn default_estimated_output_tokens() -> u32 {
+    2_000
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingPolicy {
+    #[serde(default)]
+    pub objective: RoutingObjective,
+    #[serde(default)]
+    pub max_turn_usd: Option<f64>,
+    #[serde(default)]
+    pub unknown_cost: UnknownCostPolicy,
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default)]
+    pub min_confidence: Option<u8>,
+    #[serde(default)]
+    pub require_effort_support: bool,
+    #[serde(default = "default_estimated_output_tokens")]
+    pub estimated_output_tokens: u32,
+}
+
+impl Default for RoutingPolicy {
+    fn default() -> Self {
+        Self {
+            objective: RoutingObjective::Balanced,
+            max_turn_usd: None,
+            unknown_cost: UnknownCostPolicy::Warn,
+            local_only: false,
+            min_confidence: None,
+            require_effort_support: false,
+            estimated_output_tokens: default_estimated_output_tokens(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteCandidate {
+    pub complexity: TaskComplexity,
+    pub model: ModelRef,
+    pub eligible: bool,
+    pub estimated_input_tokens: u32,
+    pub estimated_output_tokens: u32,
+    #[serde(default)]
+    pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub selector_score: Option<u8>,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl RouteCandidate {
+    pub fn detail(&self) -> String {
+        let cost = self
+            .estimated_cost_usd
+            .map(catalog::format_usd)
+            .unwrap_or_else(|| "$?".into());
+        let state = if self.eligible {
+            "eligible"
+        } else {
+            "excluded"
+        };
+        format!(
+            "{} · {state} · est. {cost}",
+            self.model.detail_with_effort(None)
+        )
+    }
+}
+
+pub fn backend_supports_effort(backend: BackendName) -> bool {
+    matches!(
+        backend,
+        BackendName::Openrouter | BackendName::OpenAi | BackendName::Grok
+    )
+}
+
+pub fn evaluate_coder_candidates(
+    stack: &ModelTierSet,
+    policy: &RoutingPolicy,
+    estimated_input_tokens: u32,
+) -> Vec<RouteCandidate> {
+    [
+        TaskComplexity::Low,
+        TaskComplexity::Medium,
+        TaskComplexity::High,
+    ]
+    .into_iter()
+    .filter_map(|complexity| {
+        let model = stack.get(complexity)?.clone();
+        let estimated_cost_usd = if model.backend.is_local() {
+            Some(0.0)
+        } else {
+            catalog::turn_cost_usd(
+                model.backend,
+                &model.model,
+                estimated_input_tokens,
+                policy.estimated_output_tokens,
+            )
+        };
+        let mut exclusions = Vec::new();
+        let mut warnings = Vec::new();
+        if policy.local_only && !model.backend.is_local() {
+            exclusions.push("policy requires a local backend".into());
+        }
+        if model.effort.is_some() && !backend_supports_effort(model.backend) {
+            let message = format!("{} does not apply requested effort", model.backend.as_str());
+            if policy.require_effort_support {
+                exclusions.push(message);
+            } else {
+                warnings.push(message);
+            }
+        }
+        match estimated_cost_usd {
+            Some(cost) => {
+                if let Some(cap) = policy.max_turn_usd.filter(|cap| cost > *cap) {
+                    exclusions.push(format!(
+                        "estimated cost {} exceeds {} cap",
+                        catalog::format_usd(cost),
+                        catalog::format_usd(cap)
+                    ));
+                }
+            }
+            None => match policy.unknown_cost {
+                UnknownCostPolicy::Allow => {}
+                UnknownCostPolicy::Warn => warnings.push("estimated cost is unknown".into()),
+                UnknownCostPolicy::Deny => {
+                    exclusions.push("policy denies models with unknown cost".into())
+                }
+            },
+        }
+        Some(RouteCandidate {
+            complexity,
+            model,
+            eligible: exclusions.is_empty(),
+            estimated_input_tokens,
+            estimated_output_tokens: policy.estimated_output_tokens,
+            estimated_cost_usd,
+            selector_score: None,
+            exclusions,
+            warnings,
+        })
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSystemConfig {
     #[serde(default)]
@@ -247,6 +437,8 @@ pub struct ModelSystemConfig {
     pub reviewers: ReviewModelSet,
     #[serde(rename = "securityReviewer", default)]
     pub security_reviewer: Option<ModelRef>,
+    #[serde(default)]
+    pub policy: RoutingPolicy,
 }
 
 impl ModelSystemConfig {
@@ -293,6 +485,12 @@ pub struct RouteDecision {
     pub security_effort: Option<EffortLevel>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<u8>,
+    #[serde(rename = "candidateScores", default)]
+    pub candidate_scores: BTreeMap<String, u8>,
+    #[serde(rename = "policyAdjustments", default)]
+    pub policy_adjustments: Vec<String>,
 }
 
 #[cfg(test)]
@@ -363,5 +561,85 @@ mod tests {
             cfg.compaction().map(|m| m.model.as_str()),
             Some("anthropic/claude-3.5-haiku")
         );
+    }
+
+    #[test]
+    fn routing_policy_round_trips_through_json() {
+        let json = r#"{
+            "policy": {
+                "objective": "cost",
+                "maxTurnUsd": 0.05,
+                "unknownCost": "deny",
+                "localOnly": true,
+                "minConfidence": 80,
+                "requireEffortSupport": true,
+                "estimatedOutputTokens": 4096
+            }
+        }"#;
+        let cfg: ModelSystemConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(cfg.policy.objective, RoutingObjective::Cost);
+        assert_eq!(cfg.policy.max_turn_usd, Some(0.05));
+        assert_eq!(cfg.policy.unknown_cost, UnknownCostPolicy::Deny);
+        assert!(cfg.policy.local_only);
+        assert_eq!(cfg.policy.min_confidence, Some(80));
+        assert!(cfg.policy.require_effort_support);
+        assert_eq!(cfg.policy.estimated_output_tokens, 4096);
+    }
+
+    #[test]
+    fn candidate_evaluation_explains_cost_and_eligibility() {
+        let stack = ModelTierSet {
+            low: ModelRef::parse_spec("openai:gpt-4o-mini"),
+            medium: ModelRef::parse_spec("openai:gpt-4o"),
+            high: ModelRef::parse_spec("openrouter:unpriced/model"),
+        };
+        let policy = RoutingPolicy {
+            max_turn_usd: Some(0.005),
+            unknown_cost: UnknownCostPolicy::Deny,
+            estimated_output_tokens: 2_000,
+            ..Default::default()
+        };
+        let candidates = evaluate_coder_candidates(&stack, &policy, 1_000);
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates[0].eligible);
+        assert!(candidates[0].estimated_cost_usd.is_some());
+        assert!(!candidates[1].eligible);
+        assert!(candidates[1]
+            .exclusions
+            .iter()
+            .any(|reason| reason.contains("exceeds")));
+        assert!(!candidates[2].eligible);
+        assert!(candidates[2]
+            .exclusions
+            .iter()
+            .any(|reason| reason.contains("unknown cost")));
+    }
+
+    #[test]
+    fn candidate_evaluation_enforces_local_and_effort_policies() {
+        let mut local = ModelRef::parse_spec("ollama:qwen2.5-coder:7b").unwrap();
+        local.effort = Some(EffortLevel::High);
+        let stack = ModelTierSet {
+            low: Some(local),
+            medium: ModelRef::parse_spec("openai:gpt-4o-mini"),
+            high: None,
+        };
+        let policy = RoutingPolicy {
+            local_only: true,
+            require_effort_support: true,
+            ..Default::default()
+        };
+        let candidates = evaluate_coder_candidates(&stack, &policy, 500);
+        assert_eq!(candidates.len(), 2);
+        assert!(!candidates[0].eligible);
+        assert!(candidates[0]
+            .exclusions
+            .iter()
+            .any(|reason| reason.contains("does not apply requested effort")));
+        assert!(!candidates[1].eligible);
+        assert!(candidates[1]
+            .exclusions
+            .iter()
+            .any(|reason| reason.contains("local backend")));
     }
 }
