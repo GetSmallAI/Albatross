@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::agent::ApprovalProvider;
-use crate::input::{select_from_prompt, SelectOption, SelectPrompt};
 use crate::tools::ToolPreview;
 
 use crate::theme::{FAIL, OK};
@@ -28,7 +29,23 @@ impl ApprovalCache {
     }
 }
 
-fn build_approval_prompt(name: &str, args: &Value, preview: Option<&ToolPreview>) -> SelectPrompt {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalOption {
+    shortcut: char,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalPrompt {
+    body: Vec<String>,
+    options: Vec<ApprovalOption>,
+}
+
+fn build_approval_prompt(
+    name: &str,
+    args: &Value,
+    preview: Option<&ToolPreview>,
+) -> ApprovalPrompt {
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     let mut body = match name {
         "list_dir" => vec![
@@ -98,19 +115,26 @@ fn build_approval_prompt(name: &str, args: &Value, preview: Option<&ToolPreview>
         _ => "this exact call",
     };
 
-    SelectPrompt {
-        title: "Permission required".into(),
+    ApprovalPrompt {
         body,
         options: vec![
-            SelectOption::new("Allow once", Some('y')),
-            SelectOption::new(format!("Allow {exact_scope} for the session"), Some('s')),
-            SelectOption::new(
-                format!("Allow every {name} call this session — broader access"),
-                Some('a'),
-            ),
-            SelectOption::new("Deny", Some('n')),
+            ApprovalOption {
+                shortcut: 'y',
+                label: "Allow once".into(),
+            },
+            ApprovalOption {
+                shortcut: 's',
+                label: format!("Allow {exact_scope} for the session"),
+            },
+            ApprovalOption {
+                shortcut: 'a',
+                label: format!("Allow every {name} call this session — broader access"),
+            },
+            ApprovalOption {
+                shortcut: 'n',
+                label: "Deny".into(),
+            },
         ],
-        default_idx: 0,
     }
 }
 
@@ -122,13 +146,64 @@ enum ApprovalChoice {
     Deny,
 }
 
-fn approval_choice(selection: Option<usize>) -> ApprovalChoice {
-    match selection {
-        Some(0) => ApprovalChoice::Once,
-        Some(1) => ApprovalChoice::ExactForSession,
-        Some(2) => ApprovalChoice::ToolForSession,
-        _ => ApprovalChoice::Deny,
+fn approval_shortcut(value: &str) -> Option<ApprovalChoice> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "y" => Some(ApprovalChoice::Once),
+        "s" => Some(ApprovalChoice::ExactForSession),
+        "a" => Some(ApprovalChoice::ToolForSession),
+        "n" | "" => Some(ApprovalChoice::Deny),
+        _ => None,
     }
+}
+
+async fn prompt_for_approval(prompt: &ApprovalPrompt) -> ApprovalChoice {
+    println!("  Permission required");
+    for line in &prompt.body {
+        println!("    {line}");
+    }
+    for option in &prompt.options {
+        println!("  [{}] {}", option.shortcut, option.label);
+    }
+
+    print!("  Allow? [y/s/a/n]: ");
+    let _ = std::io::stdout().flush();
+    let choice = tokio::task::spawn_blocking(read_approval_shortcut)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(ApprovalChoice::Deny);
+    println!();
+    choice
+}
+
+fn read_approval_shortcut() -> anyhow::Result<ApprovalChoice> {
+    crate::cursor::set_state(crate::cursor::CursorState::Passive)?;
+    crossterm::terminal::enable_raw_mode()?;
+    let result = loop {
+        let Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind,
+            ..
+        }) = crossterm::event::read()?
+        else {
+            continue;
+        };
+        if kind == KeyEventKind::Release {
+            continue;
+        }
+        if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')) {
+            crate::cursor::restore();
+            std::process::exit(0);
+        }
+        if let KeyCode::Char(key) = code {
+            if let Some(choice) = approval_shortcut(&key.to_string()) {
+                break choice;
+            }
+        }
+    };
+    crossterm::terminal::disable_raw_mode()?;
+    Ok(result)
 }
 
 fn approval_cache_key(name: &str, args: &Value) -> String {
@@ -172,10 +247,7 @@ impl ApprovalProvider for ApprovalCache {
             .cloned()
             .collect::<Vec<_>>()
             .join(" · ");
-        let choice = match select_from_prompt(prompt).await {
-            Ok(selection) => approval_choice(selection),
-            Err(_) => ApprovalChoice::Deny,
-        };
+        let choice = prompt_for_approval(&prompt).await;
 
         match choice {
             ApprovalChoice::Once => {
@@ -213,7 +285,6 @@ mod tests {
     fn external_directory_prompt_explains_action_and_grant_scopes() {
         let prompt = build_approval_prompt("list_dir", &json!({ "path": "/tmp/Albatross" }), None);
 
-        assert_eq!(prompt.title, "Permission required");
         assert_eq!(
             prompt.body,
             vec![
@@ -228,16 +299,15 @@ mod tests {
                 .map(|option| (option.label.as_str(), option.shortcut))
                 .collect::<Vec<_>>(),
             vec![
-                ("Allow once", Some('y')),
-                ("Allow this directory for the session", Some('s')),
+                ("Allow once", 'y'),
+                ("Allow this directory for the session", 's'),
                 (
                     "Allow every list_dir call this session — broader access",
-                    Some('a')
+                    'a'
                 ),
-                ("Deny", Some('n')),
+                ("Deny", 'n'),
             ]
         );
-        assert_eq!(prompt.default_idx, 0);
     }
 
     #[test]
@@ -280,13 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn picker_selection_maps_to_the_expected_approval_scope() {
-        assert_eq!(approval_choice(Some(0)), ApprovalChoice::Once);
-        assert_eq!(approval_choice(Some(1)), ApprovalChoice::ExactForSession);
-        assert_eq!(approval_choice(Some(2)), ApprovalChoice::ToolForSession);
-        assert_eq!(approval_choice(Some(3)), ApprovalChoice::Deny);
-        assert_eq!(approval_choice(None), ApprovalChoice::Deny);
-        assert_eq!(approval_choice(Some(99)), ApprovalChoice::Deny);
+    fn approval_shortcuts_map_to_the_expected_approval_scope() {
+        assert_eq!(approval_shortcut("Y"), Some(ApprovalChoice::Once));
+        assert_eq!(
+            approval_shortcut("s"),
+            Some(ApprovalChoice::ExactForSession)
+        );
+        assert_eq!(approval_shortcut("a"), Some(ApprovalChoice::ToolForSession));
+        assert_eq!(approval_shortcut("n"), Some(ApprovalChoice::Deny));
+        assert_eq!(approval_shortcut(""), Some(ApprovalChoice::Deny));
+        assert_eq!(approval_shortcut("invalid"), None);
     }
 
     #[test]
