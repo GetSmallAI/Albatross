@@ -26,7 +26,10 @@ use crate::project_memory::{
     maybe_project_context, refresh_project_memory_after_write, render_stable_system_prompt,
     PROJECT_CONTEXT_HEADER,
 };
-use crate::route_audit::{append_event, model_call_event, session_id, ModelCallInput};
+use crate::route_audit::{
+    append_event, model_call_event, route_outcome_event, session_id, ModelCallInput,
+    RouteOutcomeInput, RouteOutcomeStatus,
+};
 use crate::session::save_message;
 use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
@@ -1176,6 +1179,37 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                         }
                     }
                 }
+            }
+        }
+    }
+
+    if let (Some(route), Some(test_result)) =
+        (state.active_route.as_ref(), last_test_result.as_ref())
+    {
+        let passed = test_result.failed == 0 && test_result.exit_code == 0;
+        let ready_to_ship = collect_shipcheck(&state.config.workspace_root)
+            .ok()
+            .map(|snapshot| snapshot.ready_to_ship());
+        let note = format!(
+            "{} passed · {} failed · exit {}",
+            test_result.passed, test_result.failed, test_result.exit_code
+        );
+        let outcome = route_outcome_event(RouteOutcomeInput {
+            route_id: &route.route_id,
+            session_id: &session_id(&state.session_path),
+            outcome: if passed {
+                RouteOutcomeStatus::Pass
+            } else {
+                RouteOutcomeStatus::Fail
+            },
+            source: "auto-test",
+            tests_passed: Some(passed),
+            ready_to_ship,
+            note: Some(&note),
+        });
+        if let Err(error) = append_event(&state.config.workspace_root, &outcome) {
+            if state.renderer.verbose_enabled() {
+                println!("  {YELLOW}!{RESET} {DIM}route outcome not recorded: {error}{RESET}");
             }
         }
     }

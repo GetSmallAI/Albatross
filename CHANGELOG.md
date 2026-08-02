@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-01
+
+### Added
+
+- Added routing policies for quality, cost, confidence, local-only operation,
+  effort compatibility, per-turn cost caps, and unknown-cost handling.
+- Added selector confidence and per-candidate scoreboards with cost estimates,
+  eligibility warnings, policy exclusions, policy hashes, and deterministic
+  fallback explanations in durable routing receipts.
+- Added `/route simulate`, `/route why-not`, `/route label`, and `/route report`
+  for dry-run selection, rejected-candidate inspection, outcome capture, and
+  aggregate routing quality/cost reporting. Automatic test results also label
+  the active route.
+
 ## [2.0.3] - 2026-07-30
 
 ### Added
