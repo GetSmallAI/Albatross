@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-01
+
 ### Added
 
 - Added routing policies for quality, cost, confidence, local-only operation,
