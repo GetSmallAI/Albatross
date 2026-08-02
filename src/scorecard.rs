@@ -1567,27 +1567,6 @@ fn session_path_for_storage(workspace_root: &str, session_path: &Path) -> String
         .unwrap_or_else(|_| session_path.display().to_string())
 }
 
-pub fn format_scorecard_suffix(
-    workspace_root: &str,
-    enabled: bool,
-    nudge_min_turns: usize,
-) -> Result<String> {
-    if !enabled {
-        return Ok(String::new());
-    }
-    let summary = current_summary(workspace_root)?;
-    if summary.turn_count == 0 || summary.turn_count < nudge_min_turns {
-        return Ok(String::new());
-    }
-    if summary.branch == "main" || summary.branch == "master" {
-        return Ok(String::new());
-    }
-    Ok(format!(
-        "{} turn(s) tracked · /ship pr closes scorecard",
-        summary.turn_count
-    ))
-}
-
 fn latest_pr_timestamp(events: &[ScorecardEvent], unit: &WorkUnit) -> Option<DateTime<Utc>> {
     events
         .iter()

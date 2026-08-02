@@ -172,8 +172,12 @@ impl Tool for FileEditTool {
                     return match tokio::fs::write(&resolved.normalized, content.as_bytes()).await {
                         Ok(_) => json!({
                             "edited": true,
+                            "created": true,
                             "path": path,
                             "diff": unified_diff("", content, &path),
+                            "addedLines": content.lines().count(),
+                            "removedLines": 0,
+                            "hunks": usize::from(!content.is_empty()),
                             "verified": true,
                             "applied_snippet": content,
                         }),
@@ -306,6 +310,10 @@ mod tests {
         .await;
 
         assert!(result["edited"].as_bool().unwrap(), "{result}");
+        assert_eq!(result["created"].as_bool(), Some(true));
+        assert_eq!(result["addedLines"].as_u64(), Some(1));
+        assert_eq!(result["removedLines"].as_u64(), Some(0));
+        assert_eq!(result["hunks"].as_u64(), Some(1));
         assert_eq!(result["verified"].as_bool(), Some(true));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "<h1>hello</h1>");

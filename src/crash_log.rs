@@ -29,6 +29,10 @@ pub fn install_panic_hook() {
     INSTALLED.get_or_init(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // The interactive UI normally hides the hardware cursor while the
+            // model owns the terminal. Restore it before printing a crash so
+            // the user's shell is never left in that passive state.
+            crate::cursor::restore();
             // Always run the previous hook first so the user still sees the
             // crash on stderr; the file is the *addition*, not a replacement.
             prev(info);

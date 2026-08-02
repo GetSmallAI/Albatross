@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Refined the interactive terminal experience.** Sessions now use a compact
+  live header and stable composer, while model/tool activity renders in its own
+  transient region instead of competing with the permanent transcript. Turn
+  receipts are more compact; file changes, approvals, notices, code blocks, and
+  tool evidence use clearer semantic presentation.
+
+### Fixed
+
+- Workspace-local setup now stores `workspaceRoot` as `.` so configuration
+  remains valid when a repository is moved or renamed.
+- Slash-command completion now submits the highlighted option with Enter.
+- Tool receipts retain terminal alignment, and redundant confirmation-only tool
+  calls are suppressed after a successful action.
+
 ## [2.1.0] - 2026-08-01
 
 ### Added

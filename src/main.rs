@@ -20,6 +20,7 @@ mod config;
 mod context_guard;
 mod continuation;
 mod crash_log;
+mod cursor;
 mod diff_view;
 mod dir_migration;
 mod fable_usage;
@@ -63,7 +64,7 @@ use std::io::{IsTerminal, Read, Write};
 use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
 use crate::backends::{default_model, validate, BackendName};
-use crate::banner::{print_banner, BannerInfo};
+use crate::banner::{compact_session_context_for, print_session_header};
 use crate::commands::dispatch;
 use crate::config::load_config;
 use crate::hooks::{
@@ -71,7 +72,9 @@ use crate::hooks::{
     load_hook_state_file_from, render_hook_context_block, HookEventName, HookInvocationContext,
     HookNotice, HookNoticeLevel, HookRegistry, HookTrustStatus,
 };
-use crate::input::{plain_read_line_with_history_outcome, InputHistory, ReadLineOutcome};
+use crate::input::{
+    read_composer_with_history_outcome, ComposerFooter, InputHistory, ReadLineOutcome,
+};
 use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, load_session_metadata, new_session_path};
@@ -80,15 +83,13 @@ use crate::session_turn::{
     dispatch_app_hook, run_user_turn, system_prompt_with_hook_context,
     updated_prompt_from_hook_input, TurnOptions,
 };
+use crate::theme::{notice, NoticeKind};
 use crate::tools::{build_tools_for_names, select_tool_names};
 use crate::turn_checkpoint::CheckpointStack;
 use crate::warmup::warmup;
 
 const RESET: crate::theme::Style = crate::theme::RESET;
 const DIM: crate::theme::Style = crate::theme::MUTED;
-const GREEN: crate::theme::Style = crate::theme::SUCCESS;
-const YELLOW: crate::theme::Style = crate::theme::WARN;
-const RED: crate::theme::Style = crate::theme::ERROR;
 
 struct CliOneShot {
     prompt: String,
@@ -183,7 +184,12 @@ fn write_hook_review_notice(out: &mut impl Write, hooks: &HookRegistry) {
     if review_needed > 0 {
         let _ = writeln!(
             out,
-            "  {YELLOW}!{RESET} {DIM}{review_needed} hook(s) need review and will be skipped. Run /hooks to inspect or trust them.{RESET}"
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                &format!("{review_needed} hook(s) skipped pending review"),
+                Some("Run /hooks to inspect or trust them."),
+            )
         );
     }
     let invalid = hooks
@@ -194,7 +200,12 @@ fn write_hook_review_notice(out: &mut impl Write, hooks: &HookRegistry) {
     if invalid > 0 {
         let _ = writeln!(
             out,
-            "  {YELLOW}!{RESET} {DIM}{invalid} hook(s) have invalid matchers and will be skipped. Run /hooks to inspect them.{RESET}"
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                &format!("{invalid} hook(s) skipped because their matchers are invalid"),
+                Some("Run /hooks to inspect them."),
+            )
         );
     }
 }
@@ -604,7 +615,14 @@ fn load_runtime_hooks(
         crate::hooks::load_managed_hooks_from_env(managed_env.as_deref(), managed_file.as_deref())?;
     let hook_state = match hook_state_file_path() {
         Some(path) => load_hook_state_file_from(&path).unwrap_or_else(|e| {
-            eprintln!("  {YELLOW}!{RESET} {DIM}hook trust state ignored: {e}{RESET}");
+            eprintln!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Hook trust state ignored",
+                    Some(&e.to_string()),
+                )
+            );
             crate::hooks::HookStateFile::default()
         }),
         None => crate::hooks::HookStateFile::default(),
@@ -711,6 +729,7 @@ async fn main() -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
+    let _cursor_session = crate::cursor::CursorGuard::interactive_session()?;
     let setup_base = load_config();
     crate::theme::init(setup_base.display.color, setup_base.display.ascii);
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
@@ -735,25 +754,32 @@ async fn main() -> anyhow::Result<()> {
                 BackendName::Grok => "/login grok",
                 _ => "/login openai-codex",
             };
-            println!("  {YELLOW}!{RESET} {DIM}{e}{RESET}");
             println!(
-                "  {DIM}Starting anyway so you can run {login_cmd}, or /backend to switch.{RESET}"
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Backend login required",
+                    Some(&format!("{e} Run {login_cmd}, or /backend to switch.")),
+                )
             );
         } else {
-            eprintln!("{e}");
+            eprintln!(
+                "{}",
+                notice(
+                    NoticeKind::Error,
+                    "Backend configuration failed",
+                    Some(&e.to_string())
+                )
+            );
+            crate::cursor::restore();
             std::process::exit(1);
         }
     }
     let model = default_model(&backend_desc, config.model_override.as_deref());
 
     if config.display.show_banner {
-        print_banner(BannerInfo {
-            backend: config.backend.as_str(),
-            model: &model,
-            approval: config.approval_policy.as_str(),
-        });
         if let Some(notice) = crate::update_check::pending_notice(env!("CARGO_PKG_VERSION")) {
-            println!("  {YELLOW}↑{RESET} {DIM}{notice}{RESET}");
+            println!("{}", crate::theme::notice(NoticeKind::Info, &notice, None));
         }
     }
 
@@ -777,15 +803,24 @@ async fn main() -> anyhow::Result<()> {
         probe_backend(&http, &backend_desc).await
     };
     if let Err(hint) = probe {
-        println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {hint}{RESET}");
-        println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
+        println!(
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                "Backend not reachable",
+                Some(&format!(
+                    "{hint} Use /backend to switch, or fix the connection and retry."
+                )),
+            )
+        );
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
         let warmup_tool_names = select_tool_names(&config, "");
         let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
         let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
-        let loader = crate::loader::Loader::start("Warming up".into(), config.display.loader_style);
-        match warmup(
+        let activity =
+            crate::loader::Loader::start("Getting ready".into(), config.display.loader_style);
+        let warm_result = warmup(
             &http,
             &backend_desc,
             &model,
@@ -793,26 +828,16 @@ async fn main() -> anyhow::Result<()> {
             &warmup_prompt,
             &warmup_tool_defs,
         )
-        .await
-        {
-            Ok(ms) => {
-                warmed_fingerprint = Some(prompt_fingerprint(
-                    &backend_desc,
-                    &model,
-                    None,
-                    &warmup_prompt,
-                    &warmup_tool_names,
-                ));
-                loader.stop();
-                println!(
-                    "  {DIM}warmed up in {:.1}s — first prompt should be fast{RESET}",
-                    ms as f64 / 1000.0
-                );
-            }
-            Err(e) => {
-                loader.stop();
-                println!("  {DIM}warmup skipped: {e}{RESET}");
-            }
+        .await;
+        activity.stop();
+        if warm_result.is_ok() {
+            warmed_fingerprint = Some(prompt_fingerprint(
+                &backend_desc,
+                &model,
+                None,
+                &warmup_prompt,
+                &warmup_tool_names,
+            ));
         }
     }
 
@@ -881,7 +906,12 @@ async fn main() -> anyhow::Result<()> {
             .count();
         if pending > 0 {
             println!(
-                "  {YELLOW}!{RESET} {DIM}MCP: {pending} new or modified server(s) skipped; review with /mcp{RESET}"
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    &format!("{pending} MCP server(s) skipped pending review"),
+                    Some("Run /mcp to inspect them."),
+                )
             );
         }
         let (tools, errors) = crate::mcp::spawn_configured(&trusted).await;
@@ -893,7 +923,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         for err in &errors {
-            println!("  {YELLOW}!{RESET} {DIM}MCP: {err}{RESET}");
+            println!(
+                "{}",
+                notice(NoticeKind::Warning, "MCP server unavailable", Some(err))
+            );
         }
         state.mcp_tools = tools;
     }
@@ -922,7 +955,12 @@ async fn main() -> anyhow::Result<()> {
                         apply_path_session_state(&mut state, &path_state, &transcript);
                         if report.is_partial() {
                             println!(
-                                "{YELLOW}!{RESET} {DIM}--continue path restore partial{RESET}"
+                                "{}",
+                                notice(
+                                    NoticeKind::Warning,
+                                    "Session path restored partially",
+                                    Some("Some workspace state could not be restored."),
+                                )
                             );
                         }
                     }
@@ -936,19 +974,39 @@ async fn main() -> anyhow::Result<()> {
                         String::new()
                     };
                     println!(
-                        "{GREEN}{}{RESET} {DIM}continuing{RESET} {} {DIM}({} messages{path_note}){RESET}",
-                        crate::theme::OK,
-                        id,
-                        state.messages.len()
+                        "{}",
+                        notice(
+                            NoticeKind::Success,
+                            &format!("Continuing {id}"),
+                            Some(&format!("{} messages{path_note}", state.messages.len())),
+                        )
                     );
                 }
-                Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+                Err(e) => println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Could not continue session",
+                        Some(&e.to_string())
+                    )
+                ),
             },
             Ok(None) => println!(
-                "{YELLOW}!{RESET} {DIM}--continue: no prior session found in {}{RESET}",
-                state.session_dir
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "No prior session found",
+                    Some(&state.session_dir),
+                )
             ),
-            Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+            Err(e) => println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Could not resolve prior session",
+                    Some(&e.to_string())
+                )
+            ),
         }
     }
 
@@ -966,22 +1024,25 @@ async fn main() -> anyhow::Result<()> {
     state.session_hook_contexts =
         hook_context_messages(HookEventName::SessionStart, &start_outcome);
 
+    println!();
+    if state.config.display.show_banner {
+        print_session_header(&state.config, &state.model);
+    }
+    let mut first_prompt = true;
     loop {
-        // Header-only turn marker (a short fading rule), then a clean accent
-        // prompt. The same robust line reader is used regardless of the
-        // configured input style.
-        println!();
-        println!("{}", crate::theme::fade_header("you"));
-        let input = match plain_read_line_with_history_outcome(
-            format!(
-                "{}{}{}{} ",
-                crate::theme::PAD,
-                crate::theme::ACCENT,
-                crate::theme::PROMPT_CHAR,
-                RESET
-            ),
+        if !first_prompt {
+            println!();
+        }
+        let composer_footer = if first_prompt {
+            ComposerFooter::KeyboardHint
+        } else {
+            ComposerFooter::Session(compact_session_context_for(&state.config, &state.model))
+        };
+        let input = match read_composer_with_history_outcome(
             input_history.entries().to_vec(),
             command_names.clone(),
+            composer_footer,
+            state.renderer.composer_details().cloned(),
         )
         .await?
         {
@@ -992,6 +1053,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
+        first_prompt = false;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
@@ -1006,7 +1068,10 @@ async fn main() -> anyhow::Result<()> {
 
         if state.config.slash_commands && trimmed.starts_with('/') {
             if let Err(e) = dispatch(trimmed, &mut state).await {
-                println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
+                println!(
+                    "{}",
+                    notice(NoticeKind::Error, "Command failed", Some(&e.to_string()))
+                );
             }
             continue;
         }
@@ -1017,7 +1082,14 @@ async fn main() -> anyhow::Result<()> {
             && load_project_index(&state.config).ok().flatten().is_none()
         {
             if let Err(e) = build_project_index(&state.config) {
-                println!("  {YELLOW}!{RESET} {DIM}project memory auto-index skipped: {e}{RESET}");
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Project memory refresh skipped",
+                        Some(&e.to_string()),
+                    )
+                );
             }
         }
 
@@ -1033,7 +1105,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         {
-            println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
+            if !crate::cancel::is_cancelled_error(&e) {
+                println!(
+                    "{}",
+                    notice(NoticeKind::Error, "Turn failed", Some(&e.to_string()))
+                );
+            }
         }
     }
 }

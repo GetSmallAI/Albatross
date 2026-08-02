@@ -1,4 +1,7 @@
-use super::{diff::unified_diff, PathPolicy, Tool, ToolPreview};
+use super::{
+    diff::{diff_stats, unified_diff},
+    PathPolicy, Tool, ToolPreview,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -70,6 +73,15 @@ impl Tool for FileWriteTool {
         }
         let resolved = self.path_policy.resolve(&args.path);
         let path = resolved.normalized.display().to_string();
+        let created = matches!(
+            tokio::fs::metadata(&resolved.normalized).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        let original = if created {
+            None
+        } else {
+            tokio::fs::read_to_string(&resolved.normalized).await.ok()
+        };
         if let Some(parent) = resolved.normalized.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -78,11 +90,30 @@ impl Tool for FileWriteTool {
             }
         }
         match tokio::fs::write(&resolved.normalized, args.content.as_bytes()).await {
-            Ok(_) => json!({
-                "written": true,
-                "path": path,
-                "bytes": args.content.len(),
-            }),
+            Ok(_) => {
+                let (added_lines, removed_lines, hunks) = if created {
+                    (
+                        args.content.lines().count(),
+                        0,
+                        usize::from(!args.content.is_empty()),
+                    )
+                } else {
+                    original
+                        .as_deref()
+                        .map(|old| diff_stats(&unified_diff(old, &args.content, &path)))
+                        .map(|stats| (stats.added, stats.removed, stats.hunks))
+                        .unwrap_or((0, 0, 0))
+                };
+                json!({
+                    "written": true,
+                    "created": created,
+                    "path": path,
+                    "bytes": args.content.len(),
+                    "addedLines": added_lines,
+                    "removedLines": removed_lines,
+                    "hunks": hunks,
+                })
+            }
             Err(e) => json!({ "error": e.to_string() }),
         }
     }
@@ -112,6 +143,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_result_reports_semantic_change_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt.txt");
+        let result = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "content": "alpha\nbeta"
+        }))
+        .await;
+
+        assert_eq!(result["created"], true);
+        assert_eq!(result["addedLines"], 2);
+        assert_eq!(result["removedLines"], 0);
+        assert_eq!(result["hunks"], 1);
+    }
+
+    #[tokio::test]
     async fn writes_file_creating_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c/file.txt");
@@ -134,7 +185,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("o.txt");
         tokio::fs::write(&path, "old contents").await.unwrap();
-        let _ = FileWriteTool {
+        let result = FileWriteTool {
             approve: false,
             path_policy: PathPolicy::default(),
         }
@@ -143,6 +194,10 @@ mod tests {
             "content": "new"
         }))
         .await;
+        assert_eq!(result["created"], false);
+        assert_eq!(result["addedLines"], 1);
+        assert_eq!(result["removedLines"], 1);
+        assert_eq!(result["hunks"], 1);
         let read = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(read, "new");
     }

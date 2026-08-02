@@ -613,6 +613,9 @@ fn picker_marker(is_selected: bool, is_default: bool) -> String {
 /// Ask whether to pin the just-selected choice as the project default.
 /// Used by interactive pickers when the user did not already pass `--default`.
 async fn confirm_save_as_default() -> Result<bool> {
+    // Keep the session change and the persistence decision as two distinct
+    // beats; otherwise they visually run together after an interactive menu.
+    println!();
     println!(
         "  {DIM}Save as project default in {RESET}{CYAN}{}{RESET}{DIM}? [y/N]{RESET}",
         crate::config::AGENT_CONFIG_PATH
@@ -715,6 +718,11 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     state.active_route = None;
     state.rebuild_client()?;
     state.resolve_model();
+    if rest.is_empty() {
+        // The menu has just ended; leave a small pause before reporting the
+        // applied session change.
+        println!();
+    }
     println!(
         "  {GREEN}✓{RESET} {DIM}backend →{RESET} {CYAN}{}{RESET} {DIM}· model →{RESET} {CYAN}{}{RESET}",
         chosen.as_str(),
@@ -933,6 +941,9 @@ async fn apply_interactive_model_choice(
     state: &mut AppState,
     model_override: Option<String>,
 ) -> Result<()> {
+    // The picker has just completed. Separate its final keyboard-help line
+    // from the applied choice so both are easy to read at a glance.
+    println!();
     apply_model_choice(state, model_override);
     maybe_persist_model_default(state, false).await
 }

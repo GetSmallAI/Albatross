@@ -116,7 +116,10 @@ fn setup_config_value(config: &AgentConfig) -> Value {
     }
     obj.insert("maxSteps".into(), json!(config.max_steps));
     obj.insert("sessionDir".into(), json!(config.session_dir));
-    obj.insert("workspaceRoot".into(), json!(config.workspace_root));
+    obj.insert(
+        "workspaceRoot".into(),
+        json!(portable_workspace_root(&config.workspace_root)),
+    );
     obj.insert(
         "outsideWorkspace".into(),
         json!(config.outside_workspace.as_str()),
@@ -136,6 +139,17 @@ fn setup_config_value(config: &AgentConfig) -> Value {
     obj.insert("history".into(), json!(&config.history));
     obj.insert("projectMemory".into(), json!(&config.project_memory));
     Value::Object(obj)
+}
+
+fn portable_workspace_root(workspace_root: &str) -> String {
+    let current = std::env::current_dir().unwrap_or_default();
+    let configured = crate::path_security::canonical_root(Path::new(workspace_root));
+    let current = crate::path_security::canonical_root(&current);
+    if configured == current {
+        ".".into()
+    } else {
+        workspace_root.to_string()
+    }
 }
 
 async fn prompt_backend(default: BackendName) -> Result<Option<BackendName>> {
@@ -542,9 +556,25 @@ mod tests {
         assert_eq!(value["approvalPolicy"], "dangerous-only");
         assert_eq!(value["toolSelection"], "fixed");
         assert_eq!(value["outsideWorkspace"], "prompt");
+        assert_eq!(
+            value["workspaceRoot"], ".",
+            "project-local setup should survive repository moves and renames"
+        );
         assert_eq!(value["slashCommands"], true);
         assert_eq!(value["projectMemory"]["enabled"], true);
         assert!(value.get("systemPrompt").is_none());
+    }
+
+    #[test]
+    fn setup_preserves_an_explicit_external_workspace_root() {
+        let config = AgentConfig {
+            workspace_root: "/tmp/shared-workspace".into(),
+            ..Default::default()
+        };
+
+        let value = setup_config_value(&config);
+
+        assert_eq!(value["workspaceRoot"], "/tmp/shared-workspace");
     }
 
     #[test]

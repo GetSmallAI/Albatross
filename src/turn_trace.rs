@@ -92,31 +92,6 @@ pub struct TurnMetrics {
     pub hit_step_limit: bool,
 }
 
-impl TurnMetrics {
-    pub fn format_footer_suffix(&self) -> String {
-        if self.steps == 0 && self.total_ms == 0 {
-            return String::new();
-        }
-        let mut parts = vec![format!("{} steps", self.steps)];
-        if let Some(ttft) = self.ttft_ms {
-            parts.push(format!("TTFT {:.1}s", ttft as f64 / 1000.0));
-        }
-        if self.model_ms > 0 {
-            parts.push(format!("model {:.1}s", self.model_ms as f64 / 1000.0));
-        }
-        if self.tool_ms > 0 {
-            parts.push(format!("tools {:.1}s", self.tool_ms as f64 / 1000.0));
-        }
-        if self.approval_ms > 0 {
-            parts.push(format!("approval {:.1}s", self.approval_ms as f64 / 1000.0));
-        }
-        if self.total_ms > 0 {
-            parts.push(format!("total {:.1}s", self.total_ms as f64 / 1000.0));
-        }
-        parts.join(" · ")
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TracePayload {
@@ -497,24 +472,6 @@ mod tests {
         let text = std::fs::read_to_string(events_path_for_session(&session)).unwrap();
         assert!(text.contains("\"kind\":\"warmup\""));
         assert!(text.contains("\"turn\":1"));
-    }
-
-    #[test]
-    fn footer_suffix_formats_timing() {
-        let m = TurnMetrics {
-            steps: 4,
-            ttft_ms: Some(900),
-            model_ms: 3200,
-            tool_ms: 5100,
-            approval_ms: 0,
-            total_ms: 9400,
-            hit_step_limit: false,
-        };
-        let s = m.format_footer_suffix();
-        assert!(s.contains("4 steps"));
-        assert!(s.contains("TTFT"));
-        assert!(s.contains("model"));
-        assert!(s.contains("tools"));
     }
 
     #[test]

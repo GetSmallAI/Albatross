@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{ACCENT, BOLD, MUTED, PAD, POINT, RESET};
+use crate::theme::{fade_header, ACCENT, BOLD, MUTED, PAD, POINT, PROMPT_CHAR, RESET, TEXT};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -105,7 +105,10 @@ pub async fn plain_read_line_with_history(
     match plain_read_line_with_history_outcome(prompt, history, commands).await? {
         ReadLineOutcome::Line(line) => Ok(line),
         ReadLineOutcome::Eof => Err(anyhow!("input closed")),
-        ReadLineOutcome::Interrupted => std::process::exit(0),
+        ReadLineOutcome::Interrupted => {
+            crate::cursor::restore();
+            std::process::exit(0)
+        }
     }
 }
 
@@ -117,8 +120,392 @@ pub async fn plain_read_line_with_history_outcome(
     tokio::task::spawn_blocking(move || read_plain_outcome(&prompt, &history, &commands)).await?
 }
 
+pub async fn read_composer_with_history_outcome(
+    history: Vec<String>,
+    commands: Vec<(String, String)>,
+    footer: ComposerFooter,
+    details: Option<ComposerDetails>,
+) -> Result<ReadLineOutcome> {
+    tokio::task::spawn_blocking(move || read_composer_outcome(&history, &commands, footer, details))
+        .await?
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerFooter {
+    KeyboardHint,
+    Session(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerDetails {
+    pub body: String,
+    pub expanded_by_default: bool,
+}
+
 fn render_value(value: &str) -> String {
     value.replace('\n', "⏎")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerFrame {
+    text: String,
+    rows: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ComposerPresentation<'a> {
+    footer: &'a ComposerFooter,
+    details: Option<&'a str>,
+    details_expanded: bool,
+}
+
+#[derive(Debug, Default)]
+struct ComposerRegion {
+    cursor_row: Option<usize>,
+}
+
+impl ComposerRegion {
+    fn replace(&mut self, frame: ComposerFrame) -> String {
+        let mut output = self.clear();
+        if output.is_empty() {
+            output.push('\r');
+        }
+        output.push_str(&frame.text);
+
+        let up = frame
+            .rows
+            .saturating_sub(1)
+            .saturating_sub(frame.cursor_row);
+        if up > 0 {
+            output.push_str(&format!("\x1b[{up}A"));
+        }
+        output.push('\r');
+        if frame.cursor_col > 0 {
+            output.push_str(&format!("\x1b[{}C", frame.cursor_col));
+        }
+        self.cursor_row = Some(frame.cursor_row);
+        output
+    }
+
+    fn clear(&mut self) -> String {
+        let Some(cursor_row) = self.cursor_row.take() else {
+            return String::new();
+        };
+        let mut output = String::new();
+        if cursor_row > 0 {
+            output.push_str(&format!("\x1b[{cursor_row}A"));
+        }
+        output.push_str("\r\x1b[0J");
+        output
+    }
+
+    fn finish(&mut self, submitted: Option<&str>) -> String {
+        let mut output = self.clear();
+        let Some(submitted) = submitted.filter(|value| !value.trim().is_empty()) else {
+            return output;
+        };
+
+        // Once submitted, a message is transcript content rather than an
+        // editable prompt. Give it the same role header as an assistant
+        // response; the arrow remains exclusive to the active composer.
+        output.push_str(&format!("\r\n{}\r\n", fade_header("user")));
+        for line in submitted.lines() {
+            output.push_str(&format!("\r{PAD}{TEXT}{line}{RESET}\r\n"));
+        }
+        output
+    }
+}
+
+fn render_composer(
+    chars: &[char],
+    cursor: usize,
+    commands: &[(String, String)],
+    sel: usize,
+    dismissed: bool,
+    presentation: ComposerPresentation<'_>,
+    term_cols: usize,
+) -> ComposerFrame {
+    let ComposerPresentation {
+        footer,
+        details,
+        details_expanded,
+    } = presentation;
+    let width = term_cols.max(20);
+    let rule = if crate::theme::ascii_enabled() {
+        "-"
+    } else {
+        "─"
+    };
+    let (top_left, side, bottom_left) = if crate::theme::ascii_enabled() {
+        ("+-", "|", "+-")
+    } else {
+        ("╭─", "│", "╰─")
+    };
+    let label = " message ";
+    let top_prefix = format!("{PAD}{top_left}{label}");
+    let top_fill = rule.repeat(width.saturating_sub(top_prefix.chars().count()));
+    let cursor = cursor.min(chars.len());
+    let editor_col = PAD.chars().count() + side.chars().count() + 1 + 2;
+    let editor_width = width.saturating_sub(editor_col + 1).max(1);
+    let (editor_lines, cursor_line, cursor_in_line) =
+        layout_composer_text(chars, cursor, editor_width);
+
+    let value: String = chars.iter().collect();
+    let matches = completion_matches(&value, cursor, chars.len(), commands, dismissed);
+    let selected = if matches.is_empty() {
+        0
+    } else {
+        sel.min(matches.len() - 1)
+    };
+    let ghost = matches
+        .get(selected)
+        .and_then(|(name, _)| name.strip_prefix(value.as_str()))
+        .unwrap_or("");
+
+    let expanded_details = details.filter(|_| details_expanded);
+    let detail_rows = expanded_details
+        .map(|value| value.lines().count() + 1)
+        .unwrap_or(0);
+    let mut text = String::new();
+    if let Some(details) = expanded_details {
+        for (index, line) in details.lines().enumerate() {
+            if index > 0 {
+                text.push_str("\r\n");
+            }
+            text.push_str(&crate::theme::truncate_visible(line, width));
+        }
+        text.push_str("\r\n\r\n");
+    }
+    text.push_str(&format!("{MUTED}{top_prefix}{top_fill}{RESET}"));
+    for (index, editor_line) in editor_lines.iter().enumerate() {
+        let indicator = if index == 0 {
+            format!("{ACCENT}{PROMPT_CHAR}{RESET} ")
+        } else {
+            "  ".to_string()
+        };
+        text.push_str(&format!(
+            "\r\n{MUTED}{PAD}{side}{RESET} {indicator}{editor_line}"
+        ));
+        if index == editor_lines.len() - 1 && !ghost.is_empty() {
+            let room = editor_width.saturating_sub(editor_line.chars().count());
+            let visible_ghost = truncate(ghost, room);
+            text.push_str(&format!("{MUTED}{visible_ghost}{RESET}"));
+        }
+    }
+
+    let mut menu_rows = 0usize;
+    if !matches.is_empty() {
+        let name_width = matches
+            .iter()
+            .map(|(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(8)
+            .min(18);
+        let start = if matches.len() <= MENU_MAX_ROWS || selected < MENU_MAX_ROWS {
+            0
+        } else {
+            selected + 1 - MENU_MAX_ROWS
+        };
+        let shown = (matches.len() - start).min(MENU_MAX_ROWS);
+        if start > 0 {
+            text.push_str(&format!("\r\n{MUTED}{PAD}{side}   … {start} above{RESET}"));
+            menu_rows += 1;
+        }
+        for (offset, (name, description)) in matches.iter().skip(start).take(shown).enumerate() {
+            let index = start + offset;
+            let description_width = width.saturating_sub(10 + name_width).max(1);
+            let description = truncate(description, description_width);
+            if index == selected {
+                text.push_str(&format!(
+                    "\r\n{MUTED}{PAD}{side}{RESET}  {ACCENT}{POINT} {BOLD}{name:<name_width$}{RESET}  {MUTED}{description}{RESET}"
+                ));
+            } else {
+                text.push_str(&format!(
+                    "\r\n{MUTED}{PAD}{side}    {name:<name_width$}  {description}{RESET}"
+                ));
+            }
+            menu_rows += 1;
+        }
+        if start + shown < matches.len() {
+            text.push_str(&format!(
+                "\r\n{MUTED}{PAD}{side}   … +{} more{RESET}",
+                matches.len() - start - shown
+            ));
+            menu_rows += 1;
+        }
+    }
+
+    let base_footer = match footer {
+        ComposerFooter::KeyboardHint if width < 46 => "Enter send · ^J newline",
+        ComposerFooter::KeyboardHint => "Enter send · Ctrl+J newline",
+        ComposerFooter::Session(context) => context,
+    };
+    let footer_text = if details.is_some() {
+        let shortcut = if width < 46 {
+            if details_expanded {
+                "^O hide"
+            } else {
+                "^O details"
+            }
+        } else if details_expanded {
+            "Ctrl+O hide"
+        } else {
+            "Ctrl+O details"
+        };
+        format!("{shortcut} · {base_footer}")
+    } else {
+        base_footer.to_string()
+    };
+    let footer = truncate(&format!("{PAD}{bottom_left} {footer_text}"), width);
+    text.push_str(&format!("\r\n{MUTED}{footer}{RESET}"));
+
+    ComposerFrame {
+        text,
+        rows: detail_rows + 1 + editor_lines.len() + menu_rows + 1,
+        cursor_row: detail_rows + 1 + cursor_line,
+        cursor_col: editor_col + cursor_in_line,
+    }
+}
+
+fn layout_composer_text(
+    chars: &[char],
+    cursor: usize,
+    width: usize,
+) -> (Vec<String>, usize, usize) {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    let mut positions = vec![(0usize, 0usize)];
+    let mut row = 0usize;
+    let mut col = 0usize;
+
+    for character in chars {
+        if *character == '\n' {
+            lines.push(String::new());
+            row += 1;
+            col = 0;
+        } else {
+            if col == width {
+                lines.push(String::new());
+                row += 1;
+                col = 0;
+            }
+            lines[row].push(*character);
+            col += 1;
+        }
+        positions.push((row, col));
+    }
+
+    let (cursor_row, cursor_col) = positions[cursor.min(chars.len())];
+    (lines, cursor_row, cursor_col)
+}
+
+enum InputSurface {
+    Plain {
+        prompt: String,
+        prompt_cols: usize,
+    },
+    Composer {
+        region: ComposerRegion,
+        footer: ComposerFooter,
+        details: Option<String>,
+        details_expanded: bool,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct EditorView<'a> {
+    chars: &'a [char],
+    cursor: usize,
+    selected: usize,
+    dismissed: bool,
+    term_cols: usize,
+}
+
+impl InputSurface {
+    fn redraw(&mut self, view: EditorView<'_>, commands: &[(String, String)]) -> String {
+        match self {
+            Self::Plain {
+                prompt,
+                prompt_cols,
+            } => render_input(
+                prompt,
+                *prompt_cols,
+                view.chars,
+                view.cursor,
+                commands,
+                view.selected,
+                view.dismissed,
+                view.term_cols,
+            ),
+            Self::Composer {
+                region,
+                footer,
+                details,
+                details_expanded,
+            } => region.replace(render_composer(
+                view.chars,
+                view.cursor,
+                commands,
+                view.selected,
+                view.dismissed,
+                ComposerPresentation {
+                    footer,
+                    details: details.as_deref(),
+                    details_expanded: *details_expanded,
+                },
+                view.term_cols,
+            )),
+        }
+    }
+
+    fn finish(
+        &mut self,
+        view: EditorView<'_>,
+        commands: &[(String, String)],
+        submitted: bool,
+    ) -> String {
+        match self {
+            Self::Plain {
+                prompt,
+                prompt_cols,
+            } => {
+                let mut output = render_input(
+                    prompt,
+                    *prompt_cols,
+                    view.chars,
+                    view.cursor,
+                    commands,
+                    view.selected,
+                    true,
+                    view.term_cols,
+                );
+                output.push_str("\r\n");
+                output
+            }
+            Self::Composer { region, .. } => {
+                let value = submitted.then(|| view.chars.iter().collect::<String>());
+                region.finish(value.as_deref())
+            }
+        }
+    }
+
+    fn toggle_details(&mut self) -> bool {
+        let Self::Composer {
+            details,
+            details_expanded,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if details.is_none() {
+            return false;
+        }
+        *details_expanded = !*details_expanded;
+        true
+    }
 }
 
 /// Maximum number of command rows shown in the completion menu at once.
@@ -145,6 +532,24 @@ fn completion_matches<'a>(
         return Vec::new();
     }
     matches
+}
+
+/// Text to submit when the user presses Enter. An open completion menu is an
+/// explicit selection surface: submit its highlighted command rather than the
+/// incomplete prefix still present in the editor.
+fn submitted_text(
+    chars: &[char],
+    cursor: usize,
+    selected: usize,
+    commands: &[(String, String)],
+    dismissed: bool,
+) -> String {
+    let typed: String = chars.iter().collect();
+    let matches = completion_matches(&typed, cursor, chars.len(), commands, dismissed);
+    matches
+        .get(selected.min(matches.len().saturating_sub(1)))
+        .map(|(name, _)| (*name).clone())
+        .unwrap_or(typed)
 }
 
 /// Build the full redraw string for the input line plus (optionally) the
@@ -286,12 +691,59 @@ fn read_plain_outcome(
     history: &[String],
     commands: &[(String, String)],
 ) -> Result<ReadLineOutcome> {
-    let mut out = std::io::stdout();
-    write!(out, "{prompt}")?;
+    read_line_outcome(
+        InputSurface::Plain {
+            prompt: prompt.to_string(),
+            prompt_cols: crate::theme::visible_len(prompt),
+        },
+        history,
+        commands,
+    )
+}
+
+fn read_composer_outcome(
+    history: &[String],
+    commands: &[(String, String)],
+    footer: ComposerFooter,
+    details: Option<ComposerDetails>,
+) -> Result<ReadLineOutcome> {
+    let details_expanded = details
+        .as_ref()
+        .map(|details| details.expanded_by_default)
+        .unwrap_or(false);
+    read_line_outcome(
+        InputSurface::Composer {
+            region: ComposerRegion::default(),
+            footer,
+            details: details.map(|details| details.body),
+            details_expanded,
+        },
+        history,
+        commands,
+    )
+}
+
+fn write_surface(
+    out: &mut impl Write,
+    surface: &mut InputSurface,
+    commands: &[(String, String)],
+    view: EditorView<'_>,
+) -> Result<()> {
+    let frame = surface.redraw(view, commands);
+    write!(out, "{frame}")?;
     out.flush()?;
+    Ok(())
+}
+
+fn read_line_outcome(
+    mut surface: InputSurface,
+    history: &[String],
+    commands: &[(String, String)],
+) -> Result<ReadLineOutcome> {
+    let mut out = std::io::stdout();
+    let _cursor = crate::cursor::CursorGuard::text_input()?;
     crossterm::terminal::enable_raw_mode()?;
-    let prompt_cols = crate::theme::visible_len(prompt);
-    let term_cols = crossterm::terminal::size()
+    let mut term_cols = crossterm::terminal::size()
         .map(|(c, _)| c as usize)
         .unwrap_or(80);
 
@@ -303,27 +755,23 @@ fn read_plain_outcome(
         // dismissed (Esc) until the next edit.
         let mut sel = 0usize;
         let mut dismissed = false;
-
-        let redraw = |out: &mut std::io::Stdout,
-                      chars: &[char],
-                      cursor: usize,
-                      sel: usize,
-                      dismissed: bool|
-         -> Result<()> {
-            let s = render_input(
-                prompt,
-                prompt_cols,
-                chars,
-                cursor,
-                commands,
-                sel,
-                dismissed,
-                term_cols,
-            );
-            write!(out, "{s}")?;
-            out.flush()?;
-            Ok(())
-        };
+        macro_rules! redraw {
+            () => {
+                write_surface(
+                    &mut out,
+                    &mut surface,
+                    commands,
+                    EditorView {
+                        chars: &chars,
+                        cursor,
+                        selected: sel,
+                        dismissed,
+                        term_cols,
+                    },
+                )?
+            };
+        }
+        redraw!();
         // Number of completion matches for the current edit state (0 = no menu).
         let match_count = |chars: &[char], cursor: usize, dismissed: bool| -> usize {
             let line: String = chars.iter().collect();
@@ -342,67 +790,95 @@ fn read_plain_outcome(
             };
 
         loop {
+            let event = crossterm::event::read()?;
+            if let Event::Resize(cols, _) = event {
+                term_cols = cols as usize;
+                redraw!();
+                continue;
+            }
             if let Event::Key(KeyEvent {
                 code,
                 modifiers,
                 kind,
                 ..
-            }) = crossterm::event::read()?
+            }) = event
             {
                 if kind == KeyEventKind::Release {
                     continue;
                 }
                 if let Some(outcome) = control_key_outcome(code, modifiers) {
-                    // See the Enter branch: `\r\n`, not `\n`, while raw mode is on.
-                    redraw(&mut out, &chars, cursor, sel, true)?;
-                    write!(out, "\r\n")?;
+                    let final_frame = surface.finish(
+                        EditorView {
+                            chars: &chars,
+                            cursor,
+                            selected: sel,
+                            dismissed,
+                            term_cols,
+                        },
+                        commands,
+                        false,
+                    );
+                    write!(out, "{final_frame}")?;
                     out.flush()?;
                     return Ok(outcome);
                 }
                 match code {
+                    KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        if surface.toggle_details() {
+                            redraw!();
+                        }
+                    }
                     KeyCode::Enter => {
-                        // Clear any open menu, then drop to the next line. Raw mode
-                        // is still active here, so a bare `\n` only line-feeds and
-                        // leaves the cursor in the input's last column — `\r` returns
-                        // it to column 0 so the caller's output isn't shifted right.
-                        redraw(&mut out, &chars, cursor, sel, true)?;
-                        write!(out, "\r\n")?;
+                        let submitted = submitted_text(&chars, cursor, sel, commands, dismissed);
+                        let submitted_chars: Vec<char> = submitted.chars().collect();
+                        let final_frame = surface.finish(
+                            EditorView {
+                                chars: &submitted_chars,
+                                cursor: submitted_chars.len(),
+                                selected: sel,
+                                dismissed,
+                                term_cols,
+                            },
+                            commands,
+                            true,
+                        );
+                        write!(out, "{final_frame}")?;
                         out.flush()?;
-                        return Ok(ReadLineOutcome::Line(chars.iter().collect()));
+                        return Ok(ReadLineOutcome::Line(submitted));
                     }
                     KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
                         chars.insert(cursor, '\n');
                         cursor += 1;
                         sel = 0;
                         dismissed = false;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Esc => {
                         dismissed = true;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Backspace if cursor > 0 => {
                         chars.remove(cursor - 1);
                         cursor -= 1;
                         sel = 0;
                         dismissed = false;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => {
                         cursor = prev_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => {
                         cursor = next_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Left if cursor > 0 => {
                         cursor -= 1;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Right if cursor < chars.len() => {
                         cursor += 1;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     // Tab accepts the selected completion (+ trailing space, ready
                     // for args). Right at end-of-line accepts it without the space.
@@ -413,7 +889,7 @@ fn read_plain_outcome(
                             cursor = chars.len();
                             sel = 0;
                             dismissed = false;
-                            redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                            redraw!();
                         }
                     }
                     KeyCode::Right => {
@@ -422,18 +898,18 @@ fn read_plain_outcome(
                             cursor = chars.len();
                             sel = 0;
                             dismissed = false;
-                            redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                            redraw!();
                         }
                     }
                     // Up/Down navigate the menu when it's open, else the history.
                     KeyCode::Up if match_count(&chars, cursor, dismissed) > 0 => {
                         sel = sel.saturating_sub(1);
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Down if match_count(&chars, cursor, dismissed) > 0 => {
                         let n = match_count(&chars, cursor, dismissed);
                         sel = (sel + 1).min(n - 1);
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Up if !history.is_empty() => {
                         history_idx = history_idx.saturating_sub(1);
@@ -441,7 +917,7 @@ fn read_plain_outcome(
                         cursor = chars.len();
                         sel = 0;
                         dismissed = false;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Down if !history.is_empty() => {
                         if history_idx + 1 < history.len() {
@@ -454,14 +930,14 @@ fn read_plain_outcome(
                         cursor = chars.len();
                         sel = 0;
                         dismissed = false;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     KeyCode::Char(c) => {
                         chars.insert(cursor, c);
                         cursor += 1;
                         sel = 0;
                         dismissed = false;
-                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                        redraw!();
                     }
                     _ => {}
                 }
@@ -501,7 +977,10 @@ pub async fn select_from_list(
     match outcome {
         SelectOutcome::Selected(i) => Ok(Some(i)),
         SelectOutcome::Cancelled => Ok(None),
-        SelectOutcome::Interrupted => std::process::exit(0),
+        SelectOutcome::Interrupted => {
+            crate::cursor::restore();
+            std::process::exit(0)
+        }
         SelectOutcome::Eof => Err(anyhow!("input closed")),
     }
 }
@@ -527,6 +1006,12 @@ fn render_select_menu(title: &str, options: &[String], selected: usize) -> (Stri
     let mut rows = 0usize;
 
     s.push_str(&format!("{PAD}{BOLD}{title}{RESET}\r\n"));
+    rows += 1;
+
+    // Give the heading and keyboard help their own visual rhythm. The picker
+    // is a decision surface, not a compact log, so a little whitespace makes
+    // the active option easier to scan without changing the interaction.
+    s.push_str("\r\n");
     rows += 1;
 
     let start = if n <= SELECT_MAX_ROWS || selected < SELECT_MAX_ROWS {
@@ -564,6 +1049,9 @@ fn render_select_menu(title: &str, options: &[String], selected: usize) -> (Stri
         rows += 1;
     }
 
+    s.push_str("\r\n");
+    rows += 1;
+
     s.push_str(&format!(
         "{PAD}{MUTED}↑/↓ move · Enter select · 1-9 jump · q cancel{RESET}"
     ));
@@ -583,6 +1071,7 @@ fn read_select_outcome(
     let mut selected = default_idx.min(n - 1);
     let mut out = std::io::stdout();
 
+    crate::cursor::set_state(crate::cursor::CursorState::Passive)?;
     crossterm::terminal::enable_raw_mode()?;
     let result = (|| -> Result<SelectOutcome> {
         let mut first = true;
@@ -741,6 +1230,28 @@ mod tests {
     }
 
     #[test]
+    fn enter_submits_the_highlighted_command_completion() {
+        let commands = vec![
+            ("/clear".into(), "clear the screen".into()),
+            ("/close".into(), "close the session".into()),
+        ];
+        let typed: Vec<char> = "/cl".chars().collect();
+
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 0, &commands, false),
+            "/clear"
+        );
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 1, &commands, false),
+            "/close"
+        );
+        assert_eq!(
+            submitted_text(&typed, typed.len(), 0, &commands, true),
+            "/cl"
+        );
+    }
+
+    #[test]
     fn render_shows_selected_ghost_and_menu_rows() {
         let chars: Vec<char> = "/co".chars().collect();
         let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 1, false, 80);
@@ -828,7 +1339,7 @@ mod tests {
     fn select_menu_highlights_selected_row_and_counts_lines() {
         let options = vec!["ollama".into(), "openai *".into(), "openrouter".into()];
         let (frame, rows) = render_select_menu("Backend", &options, 1);
-        assert_eq!(rows, 5, "title + 3 options + hint");
+        assert_eq!(rows, 7, "title + gap + 3 options + gap + hint");
         assert!(frame.contains("Backend"), "title missing: {frame:?}");
         assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
         // Title and rows share the left gutter (PAD). The interactive loop also
@@ -837,10 +1348,18 @@ mod tests {
             frame.starts_with(PAD),
             "title must start at the left gutter: {frame:?}"
         );
-        let first_option = frame.lines().nth(1).expect("first option");
+        let first_option = frame.lines().nth(2).expect("first option");
         assert!(
             first_option.starts_with(PAD),
             "options must share the title gutter: {first_option:?}"
+        );
+        assert!(
+            frame.lines().nth(1).is_some_and(str::is_empty),
+            "heading should be separated from its options: {frame:?}"
+        );
+        assert!(
+            frame.lines().nth(5).is_some_and(str::is_empty),
+            "options should be separated from keyboard help: {frame:?}"
         );
         // Selected row keeps number+label contiguous (bold). Unselected rows
         // insert a RESET between the muted number and the label.
@@ -868,7 +1387,7 @@ mod tests {
     fn select_menu_clamps_selected_index() {
         let options = vec!["a".into(), "b".into()];
         let (frame, rows) = render_select_menu("Pick", &options, 99);
-        assert_eq!(rows, 4, "title + 2 options + hint");
+        assert_eq!(rows, 6, "title + gap + 2 options + gap + hint");
         // Out-of-range selection clamps to last item (index 1 → "2) b").
         let pointer = frame.find('▸').expect("pointer");
         let b_pos = frame.find("2) b").expect("b row");
@@ -883,8 +1402,8 @@ mod tests {
     fn select_menu_scrolls_long_lists() {
         let options: Vec<String> = (1..=20).map(|i| format!("model-{i:02}")).collect();
         let (frame, rows) = render_select_menu("Model", &options, 15);
-        // title + "… above" + 12 options + "… more" + hint
-        assert_eq!(rows, 16, "windowed frame height: {frame:?}");
+        // title + gap + "… above" + 12 options + "… more" + gap + hint
+        assert_eq!(rows, 18, "windowed frame height: {frame:?}");
         assert!(
             frame.contains("… 4 above"),
             "top overflow missing: {frame:?}"
@@ -902,5 +1421,256 @@ mod tests {
             "first page should scroll out: {frame:?}"
         );
         assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
+    }
+
+    fn render_hint_composer(
+        chars: &[char],
+        cursor: usize,
+        commands: &[(String, String)],
+        selected: usize,
+        dismissed: bool,
+        width: usize,
+    ) -> ComposerFrame {
+        render_composer(
+            chars,
+            cursor,
+            commands,
+            selected,
+            dismissed,
+            ComposerPresentation {
+                footer: &ComposerFooter::KeyboardHint,
+                details: None,
+                details_expanded: false,
+            },
+            width,
+        )
+    }
+
+    #[test]
+    fn composer_gives_editing_a_dedicated_three_row_surface() {
+        let chars: Vec<char> = "hello".chars().collect();
+
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 80);
+
+        assert_eq!(frame.rows, 3, "header + editor + keyboard hint");
+        assert!(frame.text.contains("╭─ message"));
+        assert!(frame.text.contains('│'));
+        assert!(frame.text.contains('❯'));
+        assert!(frame.text.contains("hello"));
+        assert!(frame.text.contains("╰─ Enter send · Ctrl+J newline"));
+        assert_eq!(frame.cursor_row, 1);
+        assert_eq!(frame.cursor_col, 11);
+    }
+
+    #[test]
+    fn composer_replaces_the_keyboard_hint_with_live_session_context() {
+        let chars = Vec::new();
+        let footer = ComposerFooter::Session("grok-4.5 · edit · ask · main*".into());
+
+        let frame = render_composer(
+            &chars,
+            0,
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: None,
+                details_expanded: false,
+            },
+            80,
+        );
+
+        assert!(frame.text.contains("╰─ grok-4.5 · edit · ask · main*"));
+        assert!(!frame.text.contains("Enter send"));
+        assert_eq!(frame.rows, 3);
+    }
+
+    #[test]
+    fn composer_toggles_owned_tool_details_without_losing_the_draft() {
+        let chars: Vec<char> = "draft stays".chars().collect();
+        let footer = ComposerFooter::Session("grok-4.5 · edit · ask · main*".into());
+        let details =
+            "  ● last turn details\n    Ran  command=demo-output · exit 0\n      alpha\n      beta";
+
+        let collapsed = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: Some(details),
+                details_expanded: false,
+            },
+            80,
+        );
+        let expanded = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &footer,
+                details: Some(details),
+                details_expanded: true,
+            },
+            80,
+        );
+
+        assert!(collapsed.text.contains("Ctrl+O details"));
+        assert!(!collapsed.text.contains("command=demo-output"));
+        assert!(expanded.text.contains("Ctrl+O hide"));
+        assert!(expanded.text.contains("command=demo-output"));
+        assert!(expanded.text.contains("draft stays"));
+        assert_eq!(expanded.cursor_col, collapsed.cursor_col);
+        assert!(expanded.cursor_row > collapsed.cursor_row);
+    }
+
+    #[test]
+    fn expanded_tool_details_never_wrap_beyond_the_owned_terminal_width() {
+        let chars: Vec<char> = "draft".chars().collect();
+        let details = format!("  ● last turn details\n      {}", "x".repeat(100));
+
+        let frame = render_composer(
+            &chars,
+            chars.len(),
+            &[],
+            0,
+            false,
+            ComposerPresentation {
+                footer: &ComposerFooter::KeyboardHint,
+                details: Some(&details),
+                details_expanded: true,
+            },
+            36,
+        );
+
+        for line in frame.text.split("\r\n") {
+            assert!(
+                crate::theme::visible_len(line) <= 36,
+                "composer-owned row wrapped past its tracked width: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_redraw_clears_only_its_owned_rows_and_restores_the_edit_cursor() {
+        let mut region = ComposerRegion::default();
+        let first_chars: Vec<char> = "hello".chars().collect();
+        let first = render_hint_composer(&first_chars, first_chars.len(), &[], 0, false, 80);
+        let initial = region.replace(first);
+
+        assert!(initial.starts_with('\r'));
+        assert!(initial.ends_with("\x1b[1A\r\x1b[11C"));
+
+        let second_chars: Vec<char> = "hello!".chars().collect();
+        let second = render_hint_composer(&second_chars, second_chars.len(), &[], 0, false, 80);
+        let repaint = region.replace(second);
+
+        assert!(repaint.starts_with("\x1b[1A\r\x1b[0J"));
+        assert!(repaint.ends_with("\x1b[1A\r\x1b[12C"));
+    }
+
+    #[test]
+    fn composer_submission_replaces_the_editor_with_one_durable_user_receipt() {
+        let mut region = ComposerRegion::default();
+        let chars: Vec<char> = "find the tests".chars().collect();
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
+
+        let submitted = region.finish(Some("find the tests"));
+
+        assert!(submitted.starts_with("\x1b[1A\r\x1b[0J"));
+        assert!(submitted.contains("user"));
+        assert!(
+            !submitted.contains('❯'),
+            "the prompt arrow belongs only to the active composer: {submitted:?}"
+        );
+        assert!(submitted.contains("find the tests"));
+        assert!(submitted.ends_with("\r\n"));
+        assert!(
+            !submitted.ends_with("\r\n\r\n"),
+            "the activity region owns the breathing row: {submitted:?}"
+        );
+        assert_eq!(region.clear(), "", "the temporary frame was released");
+    }
+
+    #[test]
+    fn composer_multiline_input_owns_each_visual_row_and_tracks_the_cursor() {
+        let chars: Vec<char> = "first\nsecond".chars().collect();
+
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 80);
+
+        assert_eq!(frame.rows, 4, "header + two editor rows + hint");
+        assert_eq!(frame.cursor_row, 2);
+        assert_eq!(frame.cursor_col, 12);
+        assert!(frame.text.contains("first\r\n"));
+        assert!(frame.text.contains("second"));
+        assert!(!frame.text.contains("first\nsecond"));
+    }
+
+    #[test]
+    fn composer_wraps_inside_a_narrow_terminal_without_losing_row_ownership() {
+        let chars: Vec<char> = "123456789012345678901234567890".chars().collect();
+
+        let frame = render_hint_composer(&chars, chars.len(), &[], 0, false, 20);
+
+        assert_eq!(frame.rows, 5, "header + three wrapped editor rows + hint");
+        assert_eq!(frame.cursor_row, 3);
+        assert_eq!(frame.cursor_col, 10);
+        assert!(
+            frame
+                .text
+                .split("\r\n")
+                .all(|row| crate::theme::visible_len(row) <= 20),
+            "composer row exceeded the terminal width: {:?}",
+            frame.text
+        );
+    }
+
+    #[test]
+    fn composer_keeps_command_completions_inside_its_owned_surface() {
+        let chars: Vec<char> = "/co".chars().collect();
+
+        let frame = render_hint_composer(&chars, chars.len(), &cmds(), 1, false, 80);
+
+        assert_eq!(frame.rows, 6, "header + editor + 3 matches + hint");
+        assert_eq!(frame.cursor_row, 1);
+        assert!(frame.text.contains("mpare"), "selected ghost is visible");
+        for name in ["/compact", "/compare", "/config"] {
+            assert!(frame.text.contains(name), "missing completion {name}");
+        }
+
+        let mut region = ComposerRegion::default();
+        let painted = region.replace(frame);
+        assert!(painted.ends_with("\x1b[4A\r\x1b[9C"));
+    }
+
+    #[test]
+    fn composer_resize_releases_the_previous_height_before_owning_the_new_height() {
+        let chars: Vec<char> = "123456789012345678901234567890".chars().collect();
+        let mut region = ComposerRegion::default();
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
+
+        let narrow = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 20));
+        assert!(narrow.starts_with("\x1b[1A\r\x1b[0J"));
+
+        let wide_again =
+            region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
+        assert!(wide_again.starts_with("\x1b[3A\r\x1b[0J"));
+    }
+
+    #[test]
+    fn interrupted_composer_clears_the_draft_without_creating_a_user_receipt() {
+        let chars: Vec<char> = "unfinished thought".chars().collect();
+        let mut region = ComposerRegion::default();
+        let _ = region.replace(render_hint_composer(&chars, chars.len(), &[], 0, false, 80));
+
+        let interrupted = region.finish(None);
+
+        assert_eq!(interrupted, "\x1b[1A\r\x1b[0J");
+        assert!(!interrupted.contains("unfinished thought"));
     }
 }

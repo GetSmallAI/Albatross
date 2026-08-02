@@ -13,6 +13,20 @@ use crate::config::AgentConfig;
 use crate::openai::{build_http_client, ChatMessage};
 use crate::tools::{build_tools_for_names, SubagentTool, Tool};
 
+struct DenyApproval;
+
+#[async_trait::async_trait]
+impl crate::agent::ApprovalProvider for DenyApproval {
+    async fn approve(
+        &mut self,
+        _name: &str,
+        _args: &serde_json::Value,
+        _preview: Option<&crate::tools::ToolPreview>,
+    ) -> bool {
+        false
+    }
+}
+
 fn mock_backend(listener: &TcpListener) -> BackendDescriptor {
     BackendDescriptor {
         name: BackendName::Ollama,
@@ -79,6 +93,8 @@ async fn read_and_explain_mock_loop() {
     let tools = build_tools_for_names(&config, &config.tools, None);
     let http = build_http_client();
     let mut tool_calls = Vec::new();
+    let mut lifecycle = Vec::new();
+    let mut model_requests = 0usize;
 
     let run = run_agent(
         &http,
@@ -88,10 +104,25 @@ async fn read_and_explain_mock_loop() {
         messages,
         tools,
         6,
-        |event| {
-            if let AgentEvent::ToolCall { name, .. } = event {
-                tool_calls.push(name);
+        |event| match event {
+            AgentEvent::ModelRequestStarted => {
+                model_requests += 1;
+                lifecycle.push(format!("model-request:{model_requests}"));
             }
+            AgentEvent::ToolCall { name, call_id, .. } => {
+                tool_calls.push(name);
+                lifecycle.push(format!("announced:{call_id}"));
+            }
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"));
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"));
+            }
+            AgentEvent::ToolResult { call_id, .. } => {
+                lifecycle.push(format!("receipt:{call_id}"));
+            }
+            _ => {}
         },
         None,
         None,
@@ -122,7 +153,167 @@ async fn read_and_explain_mock_loop() {
     };
     let checks = evaluate_checks(&fixture_workspace(), &fixture.checks, &run, &tool_calls);
     assert!(checks.iter().all(|c| c.passed), "{checks:?}");
+    assert_eq!(
+        lifecycle,
+        [
+            "model-request:1",
+            "announced:call_1",
+            "running:call_1",
+            "execution-finished:call_1",
+            "receipt:call_1",
+            "model-request:2"
+        ]
+    );
     assert!(!run.hit_step_limit);
+}
+
+#[tokio::test]
+async fn denied_tools_never_emit_running_activity() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_desc = mock_backend(&listener);
+    let tool_call_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"rm -f denied.txt\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer_body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Denied.\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_mock_server(listener, vec![tool_call_body, answer_body]);
+
+    let mut config = AgentConfig::default();
+    config.workspace_root = fixture_workspace().display().to_string();
+    config.tools = vec!["shell".into()];
+    config.tool_selection = crate::config::ToolSelection::Fixed;
+
+    let tools = build_tools_for_names(&config, &config.tools, None);
+    let http = build_http_client();
+    let mut approval = DenyApproval;
+    let mut lifecycle = Vec::new();
+
+    run_agent(
+        &http,
+        &backend_desc,
+        "mock",
+        None,
+        vec![ChatMessage::User {
+            content: "Delete denied.txt".into(),
+        }],
+        tools,
+        6,
+        |event| match event {
+            AgentEvent::ToolCall { call_id, .. } => lifecycle.push(format!("announced:{call_id}")),
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"))
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"))
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, .. } => {
+                lifecycle.push(format!("execution-skipped:{call_id}"))
+            }
+            AgentEvent::ToolResult { call_id, .. } => lifecycle.push(format!("receipt:{call_id}")),
+            _ => {}
+        },
+        Some(&mut approval),
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    server.join().unwrap();
+    assert_eq!(
+        lifecycle,
+        [
+            "announced:call_1",
+            "execution-skipped:call_1",
+            "receipt:call_1"
+        ]
+    );
+    assert!(!fixture_workspace().join("denied.txt").exists());
+}
+
+#[tokio::test]
+async fn confirmation_only_shell_calls_after_success_never_reach_the_ui() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let backend_desc = mock_backend(&listener);
+    let requested_call = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_requested\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"printf 'alpha\\\\nbeta\\\\ngamma\\\\n'\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let redundant_call = concat!(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redundant\",\"function\":",
+        "{\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"true\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answer = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Ran successfully.\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_mock_server(listener, vec![requested_call, redundant_call, answer]);
+
+    let mut config = AgentConfig::default();
+    config.workspace_root = fixture_workspace().display().to_string();
+    config.approval_policy = crate::config::ApprovalPolicy::Never;
+    config.tools = vec!["shell".into()];
+    config.tool_selection = crate::config::ToolSelection::Fixed;
+
+    let tools = build_tools_for_names(&config, &config.tools, None);
+    let http = build_http_client();
+    let mut lifecycle = Vec::new();
+
+    run_agent(
+        &http,
+        &backend_desc,
+        "mock",
+        None,
+        vec![ChatMessage::User {
+            content: "Run the requested command, then briefly confirm.".into(),
+        }],
+        tools,
+        6,
+        |event| match event {
+            AgentEvent::ToolCall { call_id, .. } => lifecycle.push(format!("announced:{call_id}")),
+            AgentEvent::ToolExecutionStarted { call_id, .. } => {
+                lifecycle.push(format!("running:{call_id}"))
+            }
+            AgentEvent::ToolExecutionFinished { call_id, .. } => {
+                lifecycle.push(format!("execution-finished:{call_id}"))
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, .. } => {
+                lifecycle.push(format!("execution-skipped:{call_id}"))
+            }
+            AgentEvent::ToolResult { call_id, .. } => lifecycle.push(format!("receipt:{call_id}")),
+            _ => {}
+        },
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    server.join().unwrap();
+    assert_eq!(
+        lifecycle,
+        [
+            "announced:call_requested",
+            "running:call_requested",
+            "execution-finished:call_requested",
+            "receipt:call_requested",
+        ]
+    );
 }
 
 #[tokio::test]

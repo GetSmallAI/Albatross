@@ -2,15 +2,16 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Write;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
+use crate::input::ComposerDetails;
 use crate::markdown::{MarkdownInline, MdEvent};
 
 use crate::theme::{
-    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH, BRANCH_END, CHECK, DOT, FAIL,
-    HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH_END, BRANCH_MID, CHECK,
+    CODE_GUTTER, DOT, FAIL, HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
 };
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
@@ -44,6 +45,17 @@ fn formatter_for(name: &str, args: &Value) -> String {
         "file_read" | "file_write" | "file_edit" => {
             let s = args.get("path").and_then(Value::as_str).unwrap_or("");
             format!("path={}", trunc(s, 50))
+        }
+        "apply_patch" => {
+            let files = args
+                .get("patch")
+                .and_then(Value::as_str)
+                .map(crate::tools::patch_changed_files)
+                .unwrap_or_default();
+            match files.as_slice() {
+                [path] => trunc(path, 50),
+                _ => format!("{} files", files.len()),
+            }
         }
         "glob" | "grep" => {
             let s = args.get("pattern").and_then(Value::as_str).unwrap_or("");
@@ -80,6 +92,7 @@ fn label_past(name: &str) -> &'static str {
         "file_read" => "Read",
         "file_write" => "Wrote",
         "file_edit" => "Edited",
+        "apply_patch" => "Patched",
         "glob" => "Explored",
         "grep" => "Searched",
         "list_dir" => "Listed",
@@ -204,10 +217,22 @@ impl StreamWrap {
         self.verbatim = on;
         self.col = 0;
         self.indent = 0;
-        self.at_line_start = true;
+        self.at_line_start = !on;
         self.need_space = false;
         self.in_escape = false;
         out
+    }
+
+    fn set_gutter(&mut self, gutter: impl Into<String>) {
+        self.gutter = gutter.into();
+    }
+
+    fn mark_line_started(&mut self) {
+        self.at_line_start = false;
+    }
+
+    fn is_at_line_start(&self) -> bool {
+        self.at_line_start
     }
 
     fn line_break(&mut self, out: &mut String, hard: bool) {
@@ -282,12 +307,21 @@ impl StreamWrap {
     fn feed(&mut self, s: &str) -> String {
         let mut out = String::new();
         if self.verbatim {
-            // No wrapping, no word buffering: emit as-is, but re-indent each
-            // physical line with the gutter so code stays under the panel.
+            // No wrapping or word buffering. Delay each gutter until the next
+            // character arrives so a trailing newline never leaves a dangling
+            // gutter before the closing fence event.
             for ch in s.chars() {
-                out.push(ch);
                 if ch == '\n' {
-                    out.push_str(&self.gutter);
+                    out.push(ch);
+                    self.col = 0;
+                    self.at_line_start = true;
+                } else {
+                    if self.at_line_start {
+                        out.push_str(&self.gutter);
+                        self.at_line_start = false;
+                    }
+                    out.push(ch);
+                    self.col += 1;
                 }
             }
             return out;
@@ -342,24 +376,555 @@ impl StreamWrap {
     }
 }
 
+#[derive(Clone)]
 struct PendingCall {
+    name: String,
+    args: Value,
+    output: Option<String>,
+    duration: Option<Duration>,
+}
+
+fn folded_output_lines(call: &PendingCall) -> Vec<String> {
+    let Some(output) = call.output.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    if call.name == "grep" {
+        return parsed
+            .get("matches")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|matched| {
+                let file = matched.get("file").and_then(Value::as_str).unwrap_or("?");
+                let line = matched.get("line").and_then(Value::as_u64).unwrap_or(0);
+                let content = matched.get("content").and_then(Value::as_str).unwrap_or("");
+                format!("{file}:{line}  {content}")
+            })
+            .collect();
+    }
+    let text = match call.name.as_str() {
+        "shell" => parsed.get("output").and_then(Value::as_str),
+        "file_read" => parsed.get("content").and_then(Value::as_str),
+        "run_tests" => parsed.get("outputExcerpt").and_then(Value::as_str),
+        "file_edit" | "apply_patch" => parsed.get("diff").and_then(Value::as_str),
+        _ => None,
+    };
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    if text == "(no output)" {
+        return Vec::new();
+    }
+    text.lines().map(str::to_string).collect()
+}
+
+fn tool_failed(call: &PendingCall) -> bool {
+    let Some(output) = call.output.as_deref() else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    parsed.get("error").is_some()
+        || parsed
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+        || parsed
+            .get("failed")
+            .and_then(Value::as_u64)
+            .is_some_and(|failed| failed > 0)
+        || parsed
+            .get("timedOut")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+struct EvidencePresentation {
+    inline_lines: Vec<String>,
+    hidden_lines: usize,
+    inspectable: bool,
+}
+
+fn evidence_presentation(call: &PendingCall) -> EvidencePresentation {
+    const INLINE_LINES: usize = 6;
+    const INLINE_CHARS: usize = 360;
+    const INLINE_LINE_CHARS: usize = 72;
+
+    let lines = folded_output_lines(call);
+    if lines.is_empty() {
+        return EvidencePresentation {
+            inline_lines: Vec::new(),
+            hidden_lines: 0,
+            inspectable: false,
+        };
+    }
+
+    if tool_failed(call) {
+        let hidden_lines = lines.len().saturating_sub(INLINE_LINES);
+        return EvidencePresentation {
+            inline_lines: lines.into_iter().skip(hidden_lines).collect(),
+            hidden_lines,
+            inspectable: hidden_lines > 0,
+        };
+    }
+
+    let inline_supported = !matches!(call.name.as_str(), "file_edit" | "apply_patch");
+    let inline_fits = lines.len() <= INLINE_LINES
+        && lines.iter().map(|line| line.chars().count()).sum::<usize>() <= INLINE_CHARS
+        && lines
+            .iter()
+            .all(|line| line.chars().count() <= INLINE_LINE_CHARS);
+    if inline_supported && inline_fits {
+        EvidencePresentation {
+            inline_lines: lines,
+            hidden_lines: 0,
+            inspectable: false,
+        }
+    } else {
+        EvidencePresentation {
+            inline_lines: Vec::new(),
+            hidden_lines: lines.len(),
+            inspectable: true,
+        }
+    }
+}
+
+fn format_turn_details(calls: &[PendingCall]) -> Option<ComposerDetails> {
+    let visible = calls
+        .iter()
+        .filter_map(|call| {
+            if !evidence_presentation(call).inspectable {
+                return None;
+            }
+            let output = folded_output_lines(call);
+            (!output.is_empty()).then_some((call, output))
+        })
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return None;
+    }
+
+    let mut details = format!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}last turn details{RESET}");
+    for (call, output) in visible {
+        let failed = tool_failed(call);
+        let summary = call
+            .output
+            .as_deref()
+            .map(summarize_output)
+            .unwrap_or_default();
+        details.push_str(&format!(
+            "\n{PAD}  {GRAY}{}{RESET}  {TEXT}{}{RESET}",
+            label_past(&call.name),
+            formatter_for(&call.name, &call.args)
+        ));
+        if !summary.is_empty() {
+            details.push_str(&format!("  {GRAY}· {summary}{RESET}"));
+        }
+        details.push_str(&format!("\n{PAD}    {GRAY}output{RESET}"));
+        let limit = if failed { 12 } else { 24 };
+        let hidden = output.len().saturating_sub(limit);
+        if hidden > 0 {
+            details.push_str(&format!(
+                "\n{PAD}      {GRAY}… {hidden} earlier lines hidden{RESET}"
+            ));
+        }
+        for line in output.iter().skip(hidden) {
+            details.push_str(&format!("\n{PAD}      {TEXT}{line}{RESET}"));
+        }
+    }
+    Some(ComposerDetails {
+        body: details,
+        expanded_by_default: false,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolLifecycleState {
+    Queued,
+    Running,
+    Finished,
+    Skipped,
+}
+
+struct ToolLifecycleCall {
     name: String,
     call_id: String,
     args: Value,
-    output: Option<String>,
+    state: ToolLifecycleState,
+    started_at: Option<Instant>,
+    duration: Option<Duration>,
+}
+
+struct ActivityFrame {
+    text: String,
+    rows: usize,
+}
+
+/// Owns the terminal rows used by the transient tool display. Replacing or
+/// clearing the region never moves above those rows, so immutable transcript
+/// output cannot be erased by a later lifecycle update.
+#[derive(Default)]
+struct ActiveRegion {
+    rows: usize,
+}
+
+impl ActiveRegion {
+    fn replace(&mut self, frame: ActivityFrame) -> String {
+        let mut output = self.clear();
+        output.push_str(&frame.text);
+        self.rows = frame.rows;
+        output
+    }
+
+    fn clear(&mut self) -> String {
+        if self.rows == 0 {
+            return String::new();
+        }
+        let up = self.rows.saturating_sub(1);
+        self.rows = 0;
+        if up == 0 {
+            "\r\x1b[0J".to_string()
+        } else {
+            format!("\x1b[{up}A\r\x1b[0J")
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolLifecycle {
+    calls: Vec<ToolLifecycleCall>,
+}
+
+impl ToolLifecycle {
+    fn announce(&mut self, name: &str, call_id: &str, args: Value) {
+        self.calls.push(ToolLifecycleCall {
+            name: name.to_string(),
+            call_id: call_id.to_string(),
+            args,
+            state: ToolLifecycleState::Queued,
+            started_at: None,
+            duration: None,
+        });
+    }
+
+    fn execution_started(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Running;
+            call.started_at.get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn execution_finished(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Finished;
+            call.duration = call.started_at.map(|started| started.elapsed());
+        }
+    }
+
+    fn execution_skipped(&mut self, call_id: &str) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.call_id == call_id) {
+            call.state = ToolLifecycleState::Skipped;
+        }
+    }
+
+    fn take_result(&mut self, call_id: &str) -> Option<PendingCall> {
+        let index = self.calls.iter().position(|call| call.call_id == call_id)?;
+        let call = self.calls.remove(index);
+        Some(PendingCall {
+            name: call.name,
+            args: call.args,
+            output: None,
+            duration: call.duration,
+        })
+    }
+
+    fn drain(&mut self) -> Vec<PendingCall> {
+        self.calls
+            .drain(..)
+            .map(|call| {
+                let duration = call
+                    .duration
+                    .or_else(|| call.started_at.map(|started| started.elapsed()));
+                PendingCall {
+                    name: call.name,
+                    args: call.args,
+                    output: None,
+                    duration,
+                }
+            })
+            .collect()
+    }
+
+    fn frame(&self) -> ActivityFrame {
+        self.frame_at_width(crate::theme::cols())
+    }
+
+    fn frame_at_width(&self, width: usize) -> ActivityFrame {
+        if self.calls.is_empty() {
+            return ActivityFrame {
+                text: String::new(),
+                rows: 0,
+            };
+        }
+
+        let mut text = String::from("\r\n");
+        for (index, call) in self.calls.iter().enumerate() {
+            text.push('\r');
+            text.push_str(&crate::theme::truncate_visible(
+                &format_activity_row(call),
+                width,
+            ));
+            if index + 1 < self.calls.len() {
+                text.push_str("\r\n");
+            }
+        }
+        ActivityFrame {
+            text,
+            rows: self.calls.len() + 1,
+        }
+    }
+}
+
+fn label_active(name: &str) -> &'static str {
+    match name {
+        "shell" => "Running",
+        "file_read" => "Reading",
+        "file_write" => "Writing",
+        "file_edit" => "Editing",
+        "apply_patch" => "Patching",
+        "glob" => "Exploring",
+        "grep" => "Searching",
+        "list_dir" => "Listing",
+        "task" => "Delegating",
+        _ => "Using",
+    }
+}
+
+fn format_activity_row(call: &ToolLifecycleCall) -> String {
+    let detail = formatter_for(&call.name, &call.args);
+    match call.state {
+        ToolLifecycleState::Queued => {
+            let separator = if detail.is_empty() { "" } else { " · " };
+            format!(
+                "{PAD}{GRAY}{PENDING}{RESET} {DIM}Queued{RESET}  {GRAY}{}{separator}{detail}{RESET}",
+                call.name
+            )
+        }
+        ToolLifecycleState::Running => format!(
+            "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{}{RESET}  {TEXT}{detail}{RESET}",
+            label_active(&call.name)
+        ),
+        ToolLifecycleState::Finished => format!(
+            "{PAD}{GREEN}{OK}{RESET} {DIM}{}{RESET}  {GRAY}{detail}{RESET}",
+            label_past(&call.name)
+        ),
+        ToolLifecycleState::Skipped => {
+            let separator = if detail.is_empty() { "" } else { " · " };
+            format!(
+                "{PAD}{RED}{FAIL}{RESET} {DIM}Skipped{RESET}  {GRAY}{}{separator}{detail}{RESET}",
+                call.name
+            )
+        }
+    }
+}
+
+struct ReceiptContent {
+    label: String,
+    detail: String,
+    child: Option<String>,
+}
+
+fn file_change_detail(path: &str, added: usize, removed: usize) -> String {
+    let mut detail = trunc(path, 50);
+    if added > 0 {
+        detail.push_str(&format!("  {GREEN}+{added}{RESET}"));
+    }
+    if removed > 0 {
+        detail.push_str(&format!(" {RED}−{removed}{RESET}"));
+    }
+    detail
+}
+
+fn hunk_summary(hunks: usize) -> Option<String> {
+    (hunks > 0).then(|| format!("{hunks} hunk{}", if hunks == 1 { "" } else { "s" }))
+}
+
+fn file_change_receipt_content(call: &PendingCall) -> Option<ReceiptContent> {
+    let output = serde_json::from_str::<Value>(call.output.as_deref()?).ok()?;
+    let path = call.args.get("path").and_then(Value::as_str).unwrap_or("");
+
+    if call.name == "file_write" && output.get("written").and_then(Value::as_bool) == Some(true) {
+        let label = if output.get("created").and_then(Value::as_bool) == Some(true) {
+            "Created"
+        } else {
+            "Wrote"
+        };
+        let added = output
+            .get("addedLines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let removed = output
+            .get("removedLines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return Some(ReceiptContent {
+            label: label.into(),
+            detail: file_change_detail(path, added as usize, removed as usize),
+            child: None,
+        });
+    }
+
+    if call.name == "file_edit" && output.get("edited").and_then(Value::as_bool) == Some(true) {
+        if output.get("created").and_then(Value::as_bool) == Some(true) {
+            let added = output
+                .get("addedLines")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let removed = output
+                .get("removedLines")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            return Some(ReceiptContent {
+                label: "Created".into(),
+                detail: file_change_detail(path, added, removed),
+                child: None,
+            });
+        }
+        let stats = output
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(crate::tools::diff::diff_stats)?;
+        let mut child = hunk_summary(stats.hunks);
+        if output.get("verified").and_then(Value::as_bool) == Some(false) {
+            let warning = format!("{YELLOW}unverified — disk differs{RESET}");
+            child = Some(match child {
+                Some(summary) => format!("{summary} · {warning}"),
+                None => warning,
+            });
+        }
+        return Some(ReceiptContent {
+            label: "Edited".into(),
+            detail: file_change_detail(path, stats.added, stats.removed),
+            child,
+        });
+    }
+
+    if call.name == "apply_patch" && output.get("applied").and_then(Value::as_bool) == Some(true) {
+        let stats = output
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(crate::tools::diff::diff_stats)?;
+        let files = output.get("files").and_then(Value::as_array)?;
+        let target = match files.as_slice() {
+            [file] => file.as_str().unwrap_or("file").to_string(),
+            _ => format!("{} files", files.len()),
+        };
+        return Some(ReceiptContent {
+            label: "Patched".into(),
+            detail: file_change_detail(&target, stats.added, stats.removed),
+            child: hunk_summary(stats.hunks),
+        });
+    }
+
+    None
+}
+
+fn receipt_content(call: &PendingCall) -> ReceiptContent {
+    if let Some(content) = file_change_receipt_content(call) {
+        return content;
+    }
+    ReceiptContent {
+        label: label_past(&call.name).into(),
+        detail: formatter_for(&call.name, &call.args),
+        child: call
+            .output
+            .as_deref()
+            .map(summarize_output)
+            .filter(|summary| !summary.is_empty()),
+    }
+}
+
+/// Format one completed tool as a self-contained transcript receipt.
+///
+/// Every physical row explicitly returns to column zero. This is defensive in
+/// a TUI: prompts, selectors, and spinners can leave the terminal's logical
+/// cursor column somewhere other than the left edge even after their visible
+/// content has been cleared.
+fn format_grouped_receipt(call: &PendingCall) -> String {
+    let mut content = receipt_content(call);
+    let evidence = evidence_presentation(call);
+    if evidence.hidden_lines > 0 {
+        let position = if evidence.inline_lines.is_empty() {
+            ""
+        } else {
+            " earlier"
+        };
+        let folded = format!(
+            "{}{position} line{} hidden · Ctrl+O details",
+            evidence.hidden_lines,
+            if evidence.hidden_lines == 1 { "" } else { "s" }
+        );
+        content.child = Some(match content.child {
+            Some(summary) => format!("{summary} · {folded}"),
+            None => folded,
+        });
+    }
+    let duration = call
+        .duration
+        .filter(|duration| *duration >= Duration::from_secs(1))
+        .map(|duration| format!("  {GRAY}· {:.1}s{RESET}", duration.as_secs_f64()))
+        .unwrap_or_default();
+    let mut rows = vec![format!(
+        "{PAD}{ACCENT}{DOT}{RESET} {BOLD}{}{RESET}  {TEXT}{}{RESET}{duration}",
+        content.label, content.detail
+    )];
+    if let Some(summary) = content.child {
+        let branch = if evidence.inline_lines.is_empty() {
+            BRANCH_END
+        } else {
+            BRANCH_MID
+        };
+        rows.push(format!("{PAD}  {GRAY}{branch} {summary}{RESET}"));
+    }
+    if !evidence.inline_lines.is_empty() {
+        rows.push(format!("{PAD}  {GRAY}{BRANCH_END} output{RESET}"));
+        rows.extend(
+            evidence
+                .inline_lines
+                .iter()
+                .map(|line| format!("{PAD}      {TEXT}{}{RESET}", trunc(line, 72))),
+        );
+    }
+
+    let mut receipt = String::from("\r\n");
+    for row in rows {
+        receipt.push('\r');
+        receipt.push_str(&row);
+        receipt.push_str("\r\n");
+    }
+    receipt
 }
 
 pub struct TuiRenderer {
     display: DisplayConfig,
     tool_start: HashMap<String, Instant>,
     streaming: bool,
-    grouped_pending: Vec<PendingCall>,
-    grouped_category: String,
+    tool_lifecycle: ToolLifecycle,
+    active_region: ActiveRegion,
     minimal_batch: BTreeMap<String, usize>,
+    turn_detail_calls: Vec<PendingCall>,
+    composer_details: Option<ComposerDetails>,
     /// Per-turn flag: have we already printed the "thinking…" header for the
     /// current burst of reasoning deltas? Reset at end_turn so each turn
     /// gets its own header.
     reasoning_header_shown: bool,
+    /// The response heading belongs to the turn, not to each streaming burst.
+    /// Tool calls may close and later resume the answer without repeating it.
+    answer_header_shown: bool,
     /// `Some` while the assistant's answer panel (`╭─ response … ╰─`) is open
     /// and streaming. Holds the word-wrap state so content stays inside the
     /// panel. Closed when a tool call/reasoning interrupts or the turn ends.
@@ -374,7 +939,7 @@ pub struct TuiRenderer {
 }
 
 /// Route one markdown event to the answer wrapper: styled text flows through
-/// the wrapper; fence signals flip verbatim mode and print framing rules. Kept
+/// the wrapper; fence signals flip verbatim mode and print a quiet gutter. Kept
 /// free-standing so it can borrow the wrapper without the whole renderer.
 fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
     match ev {
@@ -383,18 +948,25 @@ fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
             let _ = write!(out, "{chunk}");
         }
         MdEvent::CodeStart { lang } => {
-            // A newline+gutter always precedes a fence, so the rule (which has
-            // no leading PAD) lands correctly under the answer gutter.
             let flushed = wrap.set_verbatim(true);
             let _ = write!(out, "{flushed}");
-            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(&lang));
-            let _ = write!(out, "{PAD}");
+            let gutter = format!("{PAD}{GRAY}{CODE_GUTTER}{RESET}{TEXT} ");
+            wrap.set_gutter(gutter.clone());
+            if lang.is_empty() {
+                let _ = write!(out, "{GRAY}{CODE_GUTTER}{RESET}{TEXT} ");
+            } else {
+                let _ = writeln!(out, "{GRAY}{}{RESET}", lang.trim());
+                let _ = write!(out, "{gutter}");
+            }
+            wrap.mark_line_started();
         }
         MdEvent::CodeEnd => {
+            let at_line_start = wrap.is_at_line_start();
             let flushed = wrap.set_verbatim(false);
+            wrap.set_gutter(PAD);
             let _ = write!(out, "{flushed}");
-            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(""));
-            let _ = write!(out, "{PAD}{TEXT}");
+            let spacing = if at_line_start { "\n" } else { "\n\n" };
+            let _ = write!(out, "{spacing}{PAD}{TEXT}");
         }
     }
 }
@@ -406,10 +978,13 @@ impl TuiRenderer {
             display,
             tool_start: HashMap::new(),
             streaming: false,
-            grouped_pending: Vec::new(),
-            grouped_category: String::new(),
+            tool_lifecycle: ToolLifecycle::default(),
+            active_region: ActiveRegion::default(),
             minimal_batch: BTreeMap::new(),
+            turn_detail_calls: Vec::new(),
+            composer_details: None,
             reasoning_header_shown: false,
+            answer_header_shown: false,
             answer_wrap: None,
             answer_md: None,
             base_tool_display,
@@ -441,6 +1016,10 @@ impl TuiRenderer {
         matches!(self.display.tool_display, ToolDisplay::Verbose)
     }
 
+    pub fn composer_details(&self) -> Option<&ComposerDetails> {
+        self.composer_details.as_ref()
+    }
+
     pub fn set_trace(&mut self, on: bool) {
         self.trace_enabled = on;
     }
@@ -450,8 +1029,16 @@ impl TuiRenderer {
         self.trace_enabled
     }
 
+    /// Whether this renderer owns the transient tool rows. Other display
+    /// styles keep the legacy single-line loader until they adopt lifecycle
+    /// receipts of their own.
+    pub fn manages_tool_activity(&self) -> bool {
+        matches!(self.display.tool_display, ToolDisplay::Grouped)
+    }
+
     pub fn handle(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::ModelRequestStarted => {}
             AgentEvent::Text { delta } => self.render_text(&delta),
             AgentEvent::ToolCall {
                 name,
@@ -461,6 +1048,17 @@ impl TuiRenderer {
             } => {
                 self.end_answer();
                 self.render_tool_call(&name, &call_id, args, depth)
+            }
+            AgentEvent::ToolExecutionStarted {
+                name: _,
+                call_id,
+                depth,
+            } => self.render_tool_execution_started(&call_id, depth),
+            AgentEvent::ToolExecutionFinished { call_id, depth } => {
+                self.render_tool_execution_finished(&call_id, depth)
+            }
+            AgentEvent::ToolExecutionSkipped { call_id, depth } => {
+                self.render_tool_execution_skipped(&call_id, depth)
             }
             AgentEvent::ToolResult {
                 name,
@@ -482,7 +1080,9 @@ impl TuiRenderer {
             }
             AgentEvent::ContextCompacted { notice, .. } => {
                 self.end_answer();
+                self.clear_active_region();
                 println!("{notice}");
+                self.redraw_active_region();
             }
             AgentEvent::HookNotice(notice) => {
                 self.end_answer();
@@ -504,7 +1104,10 @@ impl TuiRenderer {
         self.flush_minimal();
         self.end_reasoning();
         self.end_streaming();
+        self.composer_details = format_turn_details(&self.turn_detail_calls);
+        self.turn_detail_calls.clear();
         self.reasoning_header_shown = false;
+        self.answer_header_shown = false;
     }
 
     /// Close the assistant answer: flush the last buffered word and end the
@@ -560,9 +1163,7 @@ impl TuiRenderer {
         }
         let mut out = std::io::stdout();
         if self.answer_wrap.is_none() {
-            let _ = writeln!(out);
-            let _ = writeln!(out, "{}", fade_header("response"));
-            let _ = write!(out, "{PAD}{TEXT}");
+            let _ = write!(out, "{}", self.answer_opening());
             // Wrap to the real content width so the answer fills the terminal
             // (like naturally-wrapped text) instead of overflowing.
             self.answer_wrap = Some(StreamWrap::new(content_width(), PAD));
@@ -576,6 +1177,17 @@ impl TuiRenderer {
         let _ = out.flush();
     }
 
+    fn answer_opening(&mut self) -> String {
+        let mut opening = String::from("\n");
+        if !self.answer_header_shown {
+            opening.push_str(&fade_header("response"));
+            opening.push('\n');
+            self.answer_header_shown = true;
+        }
+        opening.push_str(&format!("{PAD}{TEXT}"));
+        opening
+    }
+
     fn render_reasoning(&mut self, delta: &str) {
         if !self.display.reasoning {
             return;
@@ -583,13 +1195,16 @@ impl TuiRenderer {
         self.end_streaming();
         let mut out = std::io::stdout();
         if !self.reasoning_header_shown {
-            let _ = writeln!(out, "{GRAY}  thinking…{RESET}");
-            let _ = write!(out, "{DIM}  ");
+            let _ = write!(out, "{}", self.reasoning_opening());
             self.reasoning_header_shown = true;
         }
         let dimmed = delta.replace('\n', "\n  ");
         let _ = write!(out, "{dimmed}");
         let _ = out.flush();
+    }
+
+    fn reasoning_opening(&self) -> String {
+        format!("\n{GRAY}  reasoning{RESET}\n{DIM}  ")
     }
 
     fn render_tool_call(&mut self, name: &str, call_id: &str, args: Value, depth: u32) {
@@ -631,17 +1246,7 @@ impl TuiRenderer {
                 println!("  {color}{BOLT}{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
             }
             ToolDisplay::Grouped => {
-                let category = label_past(name).to_string();
-                if category != self.grouped_category {
-                    self.flush_grouped();
-                    self.grouped_category = category;
-                }
-                self.grouped_pending.push(PendingCall {
-                    name: name.to_string(),
-                    call_id: call_id.to_string(),
-                    args,
-                    output: None,
-                });
+                self.tool_lifecycle.announce(name, call_id, args);
             }
             ToolDisplay::Minimal => {
                 *self.minimal_batch.entry(name.to_string()).or_insert(0) += 1;
@@ -747,13 +1352,13 @@ impl TuiRenderer {
                 println!("  {GREEN}{OK}{RESET} {DIM}{name} {dur}{RESET}");
             }
             ToolDisplay::Grouped => {
-                if let Some(p) = self
-                    .grouped_pending
-                    .iter_mut()
-                    .find(|p| p.call_id == call_id)
-                {
-                    p.output = Some(output.to_string());
+                self.clear_active_region();
+                if let Some(mut completed) = self.tool_lifecycle.take_result(call_id) {
+                    completed.output = Some(output.to_string());
+                    self.write_grouped_receipt(&completed);
+                    self.turn_detail_calls.push(completed);
                 }
+                self.redraw_active_region();
             }
             ToolDisplay::Verbose => {
                 println!("{PAD}  {GRAY}←{RESET} {DIM}{dur}{RESET}");
@@ -774,7 +1379,9 @@ impl TuiRenderer {
         } else {
             String::new()
         };
+        self.clear_active_region();
         println!("{PAD}{indent}{DIM}{SUB} {name} output compacted: {summary}{RESET}");
+        self.redraw_active_region();
     }
 
     fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
@@ -787,50 +1394,76 @@ impl TuiRenderer {
             HookNoticeLevel::Stopped => (HOOK_STOP, "hook stopped", YELLOW),
             HookNoticeLevel::Feedback => (SUB, "hook", DIM),
         };
+        self.clear_active_region();
         println!(
             "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
             notice.event.as_str(),
             notice.message
         );
+        self.redraw_active_region();
     }
 
     fn flush_grouped(&mut self) {
-        if self.grouped_pending.is_empty() {
+        // The active region owns terminal rows independently of the registry.
+        // Always release those rows at the turn boundary, even if every call
+        // has already moved into the permanent transcript.
+        self.clear_active_region();
+        if self.tool_lifecycle.calls.is_empty() {
             return;
         }
-        // A block owns exactly one leading blank line and no trailing blank, so
-        // it separates cleanly from whatever came before without stacking a
-        // second blank against the next block's own leading gap.
-        println!();
-        let pending = std::mem::take(&mut self.grouped_pending);
-        let first = &pending[0];
-        let label = label_past(&first.name);
-
-        if pending.len() == 1 {
-            let arg_str = formatter_for(&first.name, &first.args);
-            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
-            if let Some(out) = &first.output {
-                let summary = summarize_output(out);
-                if !summary.is_empty() {
-                    println!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}");
-                }
-            }
-        } else {
-            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}");
-            let n = pending.len();
-            for (i, p) in pending.iter().enumerate() {
-                let is_last = i == n - 1;
-                let branch = if is_last { BRANCH_END } else { BRANCH };
-                let arg_str = formatter_for(&p.name, &p.args);
-                let summary = p
-                    .output
-                    .as_ref()
-                    .map(|o| format!("  {GRAY}{}{RESET}", summarize_output(o)))
-                    .unwrap_or_default();
-                println!("{PAD}  {GRAY}{branch}{RESET} {TEXT}{arg_str}{RESET}{summary}");
-            }
+        // Normally results remove and render calls one by one. If a turn ends
+        // without a matching result, still surface each orphaned call rather
+        // than silently dropping it or recombining it into a late batch.
+        for pending in self.tool_lifecycle.drain() {
+            self.write_grouped_receipt(&pending);
         }
-        self.grouped_category.clear();
+    }
+
+    fn render_tool_execution_started(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_started(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn render_tool_execution_finished(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_finished(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn render_tool_execution_skipped(&mut self, call_id: &str, depth: u32) {
+        if depth == 0 && self.manages_tool_activity() {
+            self.tool_lifecycle.execution_skipped(call_id);
+            self.redraw_active_region();
+        }
+    }
+
+    fn redraw_active_region(&mut self) {
+        let update = self.active_region.replace(self.tool_lifecycle.frame());
+        if update.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{update}");
+        let _ = out.flush();
+    }
+
+    fn clear_active_region(&mut self) {
+        let clear = self.active_region.clear();
+        if clear.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{clear}");
+        let _ = out.flush();
+    }
+
+    fn write_grouped_receipt(&self, call: &PendingCall) {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{}", format_grouped_receipt(call));
+        let _ = out.flush();
     }
 
     fn flush_minimal(&mut self) {
@@ -854,7 +1487,9 @@ impl TuiRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamWrap;
+    use super::{write_md_event, StreamWrap};
+    use crate::markdown::MarkdownInline;
+    use std::io::Write;
 
     /// Feed `text` through the wrapper one char at a time (worst case for an
     /// incremental wrapper) and return the visible lines, gutter stripped.
@@ -1032,6 +1667,32 @@ mod tests {
     }
 
     #[test]
+    fn fenced_code_uses_a_compact_gutter_without_frame_rules() {
+        crate::theme::init(crate::config::ColorMode::Never, false);
+        let input = "Before\n\n```rust\nalpha\nbeta\n```\nAfter";
+        let mut md = MarkdownInline::new();
+        let mut wrap = StreamWrap::new(80, crate::theme::PAD);
+        let mut output = Vec::new();
+        write!(output, "{}", crate::theme::PAD).unwrap();
+        for ch in input.chars() {
+            for event in md.feed(&ch.to_string()) {
+                write_md_event(&mut output, &mut wrap, event);
+            }
+        }
+        for event in md.finish() {
+            write_md_event(&mut output, &mut wrap, event);
+        }
+        write!(output, "{}", wrap.finish()).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("  rust\n  │ alpha\n  │ beta"), "{output:?}");
+        assert!(output.contains("  │ beta\n\n  After"), "{output:?}");
+        assert!(!output.contains("```"));
+        assert!(!output.contains("────"));
+        crate::theme::init(crate::config::ColorMode::Always, false);
+    }
+
+    #[test]
     fn verbatim_mode_passes_through_with_gutter() {
         let mut w = StreamWrap::new(10, ">>");
         let mut out = String::new();
@@ -1050,6 +1711,574 @@ mod verbose_tests {
     use crate::config::{DisplayConfig, ToolDisplay};
 
     #[test]
+    fn tool_lifecycle_frame_keeps_each_call_on_its_own_status_row() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce("list_dir", "list", serde_json::json!({"path": "."}));
+        lifecycle.announce("grep", "grep", serde_json::json!({"pattern": "test"}));
+        lifecycle.execution_started("list");
+
+        let frame = lifecycle.frame();
+
+        assert_eq!(frame.rows, 3, "leading gap plus one row per tool");
+        assert!(frame.text.contains("Listing"));
+        assert!(frame.text.contains("path=."));
+        assert!(frame.text.contains("Queued"));
+        assert!(frame.text.contains("grep"));
+        assert!(frame.text.contains("pattern=test"));
+    }
+
+    #[test]
+    fn tool_lifecycle_finishes_then_releases_one_call_for_its_receipt() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce("list_dir", "list", serde_json::json!({"path": "."}));
+        lifecycle.announce("grep", "grep", serde_json::json!({"pattern": "test"}));
+        lifecycle.execution_started("list");
+        lifecycle.execution_finished("list");
+
+        assert!(lifecycle.frame().text.contains("Listed"));
+        let completed = lifecycle.take_result("list").expect("known tool call");
+        let remaining = lifecycle.frame();
+
+        assert_eq!(completed.name, "list_dir");
+        assert_eq!(completed.args, serde_json::json!({"path": "."}));
+        assert_eq!(remaining.rows, 2, "leading gap plus the remaining tool");
+        assert!(!remaining.text.contains("Listed"));
+        assert!(remaining.text.contains("grep"));
+    }
+
+    #[test]
+    fn tool_lifecycle_carries_execution_duration_into_its_receipt() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({"command": "cargo test"}),
+        );
+        lifecycle.execution_started("shell");
+        lifecycle.execution_finished("shell");
+
+        let completed = lifecycle.take_result("shell").expect("known tool call");
+
+        assert!(completed.duration.is_some());
+    }
+
+    #[test]
+    fn tool_lifecycle_marks_denied_calls_as_skipped_not_completed() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({"command": "rm denied.txt"}),
+        );
+
+        lifecycle.execution_skipped("shell");
+        let frame = lifecycle.frame();
+
+        assert!(frame.text.contains("Skipped"));
+        assert!(frame.text.contains("shell"));
+        assert!(!frame.text.contains("Ran"));
+    }
+
+    #[test]
+    fn active_region_repaint_clears_only_the_rows_owned_by_the_previous_frame() {
+        let mut region = ActiveRegion::default();
+        let first = region.replace(ActivityFrame {
+            text: "\r\n\rfirst\r\n\rsecond".into(),
+            rows: 3,
+        });
+        let second = region.replace(ActivityFrame {
+            text: "\r\n\rremaining".into(),
+            rows: 2,
+        });
+        let cleared = region.clear();
+
+        assert_eq!(first, "\r\n\rfirst\r\n\rsecond");
+        assert_eq!(second, "\x1b[2A\r\x1b[0J\r\n\rremaining");
+        assert_eq!(cleared, "\x1b[1A\r\x1b[0J");
+    }
+
+    #[test]
+    fn tool_lifecycle_frame_never_wraps_on_a_narrow_terminal() {
+        let mut lifecycle = ToolLifecycle::default();
+        lifecycle.announce(
+            "shell",
+            "shell",
+            serde_json::json!({
+                "command": "find . -type f -name '*test*' -not -path './target/*'"
+            }),
+        );
+        lifecycle.execution_started("shell");
+
+        let frame = lifecycle.frame_at_width(36);
+
+        assert_eq!(frame.rows, 2);
+        for line in frame.text.split("\r\n").filter(|line| !line.is_empty()) {
+            let line = line.strip_prefix('\r').unwrap_or(line);
+            assert!(
+                crate::theme::visible_len(line) <= 36,
+                "active row wrapped past the tracked region: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_tools_leave_the_queue_as_each_result_arrives() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+        for (name, call_id) in [("list_dir", "list"), ("shell", "shell"), ("grep", "grep")] {
+            r.render_tool_call(name, call_id, serde_json::json!({"path": "."}), 0);
+        }
+
+        let before = r.tool_lifecycle.frame();
+        assert!(before.text.contains("list_dir"));
+        assert!(before.text.contains("shell"));
+        assert!(before.text.contains("grep"));
+        r.render_tool_result("list_dir", "list", r#"{"count":22}"#, 0);
+
+        let after = r.tool_lifecycle.frame();
+        assert!(!after.text.contains("list_dir"));
+        assert!(after.text.contains("shell"));
+        assert!(after.text.contains("grep"));
+    }
+
+    #[test]
+    fn grouped_receipts_anchor_every_physical_line_at_column_zero() {
+        let call = PendingCall {
+            name: "grep".into(),
+            args: serde_json::json!({"pattern": "test"}),
+            output: Some(r#"{"count":3,"matches":[]}"#.into()),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        assert!(receipt.starts_with("\r\n"), "receipt owns its leading gap");
+        for line in receipt
+            .split("\r\n")
+            .skip(1)
+            .filter(|line| !line.is_empty())
+        {
+            assert!(
+                line.starts_with('\r'),
+                "every receipt row must explicitly return to column zero: {line:?}"
+            );
+        }
+        assert!(
+            receipt.ends_with("\r\n"),
+            "receipt leaves the cursor at column zero"
+        );
+    }
+
+    #[test]
+    fn slow_grouped_receipt_surfaces_a_quiet_duration() {
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "cargo test"}),
+            output: Some(r#"{"exit_code":0}"#.into()),
+            duration: Some(std::time::Duration::from_millis(2_400)),
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(
+            receipt.contains("· 2.4s"),
+            "slow duration missing: {receipt:?}"
+        );
+    }
+
+    #[test]
+    fn short_shell_output_is_rendered_inline_beneath_the_receipt() {
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "demo-output"}),
+            output: Some(
+                serde_json::json!({
+                    "output": "alpha\nbeta\ngamma\n",
+                    "exitCode": 0
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("exit 0"));
+        assert!(receipt.contains("└ output"));
+        assert!(receipt.contains("alpha"));
+        assert!(receipt.contains("beta"));
+        assert!(receipt.contains("gamma"));
+        assert!(!receipt.contains("hidden"));
+        assert!(!receipt.contains("Ctrl+O"));
+    }
+
+    #[test]
+    fn long_shell_output_is_available_in_the_last_turn_inspector() {
+        let output = (1..=8)
+            .map(|line| format!("output line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut renderer = TuiRenderer::new(DisplayConfig::default());
+        renderer.render_tool_call(
+            "shell",
+            "shell-call",
+            serde_json::json!({"command": "demo-output"}),
+            0,
+        );
+        renderer.render_tool_execution_started("shell-call", 0);
+        renderer.render_tool_execution_finished("shell-call", 0);
+        renderer.render_tool_result(
+            "shell",
+            "shell-call",
+            &serde_json::json!({
+                "output": output,
+                "exitCode": 0
+            })
+            .to_string(),
+            0,
+        );
+        renderer.end_turn();
+
+        let details = renderer
+            .composer_details()
+            .expect("completed output should be inspectable");
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("demo-output"));
+        assert!(details.body.contains("exit 0"));
+        assert!(details.body.contains("output line 1"));
+        assert!(details.body.contains("output line 8"));
+    }
+
+    #[test]
+    fn short_file_read_content_is_rendered_inline_without_an_inspector() {
+        let call = PendingCall {
+            name: "file_read".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "content": "fn main() {\n    println!(\"hi\");\n}",
+                    "totalLines": 3
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("└ output"));
+        assert!(receipt.contains("fn main()"));
+        assert!(receipt.contains("println!"));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn short_search_results_render_as_readable_inline_rows() {
+        let call = PendingCall {
+            name: "grep".into(),
+            args: serde_json::json!({"pattern": "alpha"}),
+            output: Some(
+                serde_json::json!({
+                    "count": 2,
+                    "matches": [
+                        {"file": "src/a.rs", "line": 4, "content": "let alpha = 1;"},
+                        {"file": "src/b.rs", "line": 9, "content": "use alpha;"}
+                    ]
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("2 matches"));
+        assert!(receipt.contains("src/a.rs:4  let alpha = 1;"));
+        assert!(receipt.contains("src/b.rs:9  use alpha;"));
+        assert!(!receipt.contains("\"matches\""));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn failed_tool_output_keeps_the_useful_tail_beside_the_receipt() {
+        let output = (1..=20)
+            .map(|line| format!("failure line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "failing-check"}),
+            output: Some(
+                serde_json::json!({
+                    "output": output,
+                    "exitCode": 1
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("hidden failure output is inspectable");
+
+        assert!(receipt.contains("14 earlier lines hidden · Ctrl+O details"));
+        assert!(receipt.contains("└ output"));
+        assert!(!receipt.contains("failure line 14"));
+        assert!(receipt.contains("failure line 15"));
+        assert!(receipt.contains("failure line 20"));
+        assert!(!details.expanded_by_default);
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("8 earlier lines hidden"));
+        assert!(!details.body.contains("failure line 1\n"));
+        assert!(details.body.contains("failure line 9"));
+        assert!(details.body.contains("failure line 20"));
+    }
+
+    #[test]
+    fn long_successful_output_stays_folded_for_the_last_turn_inspector() {
+        let output = (1..=8)
+            .map(|line| format!("output line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call = PendingCall {
+            name: "shell".into(),
+            args: serde_json::json!({"command": "long-output"}),
+            output: Some(
+                serde_json::json!({
+                    "output": output,
+                    "exitCode": 0
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("long output should be inspectable");
+
+        assert!(receipt.contains("8 lines hidden · Ctrl+O details"));
+        assert!(!receipt.contains("output line 1"));
+        assert!(details.body.contains("last turn details"));
+        assert!(details.body.contains("output line 1"));
+        assert!(details.body.contains("output line 8"));
+    }
+
+    #[test]
+    fn short_test_output_is_inline_without_exposing_result_json() {
+        let call = PendingCall {
+            name: "run_tests".into(),
+            args: serde_json::json!({"mode": "all"}),
+            output: Some(
+                serde_json::json!({
+                    "framework": "cargo",
+                    "total": 2,
+                    "passed": 2,
+                    "failed": 0,
+                    "exitCode": 0,
+                    "failures": [],
+                    "outputExcerpt": "test alpha ... ok\ntest beta ... ok"
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]);
+
+        assert!(receipt.contains("test alpha ... ok"));
+        assert!(receipt.contains("test beta ... ok"));
+        assert!(!receipt.contains("outputExcerpt"));
+        assert!(!receipt.contains("Ctrl+O"));
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn file_edit_diff_is_available_behind_the_compact_hunk_receipt() {
+        let diff = "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new";
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "verified": true,
+                    "diff": diff
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+        let details = format_turn_details(&[call]).expect("diff should be inspectable");
+
+        assert!(receipt.contains("1 hunk · 5 lines hidden · Ctrl+O details"));
+        assert!(details.body.contains("-old"));
+        assert!(details.body.contains("+new"));
+        assert!(!details.body.contains("\"diff\""));
+    }
+
+    #[test]
+    fn created_file_receipt_shows_semantic_line_count() {
+        let call = PendingCall {
+            name: "file_write".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "content": "alpha\nbeta"
+            }),
+            output: Some(
+                serde_json::json!({
+                    "written": true,
+                    "created": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "addedLines": 2,
+                    "removedLines": 0,
+                    "hunks": 1
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Created"));
+        assert!(receipt.contains(".albatross/ui-receipt-demo.txt"));
+        assert!(receipt.contains("+2"));
+        assert!(!receipt.contains("path="));
+        assert!(!receipt.contains("wrote"));
+    }
+
+    #[test]
+    fn edited_file_receipt_shows_add_remove_and_hunk_counts() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "edits": [{"old_text": "beta", "new_text": "beta-polished"}]
+            }),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "diff": "--- .albatross/ui-receipt-demo.txt\n+++ .albatross/ui-receipt-demo.txt\n@@ -2 +2 @@\n-beta\n+beta-polished",
+                    "verified": true
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Edited"));
+        assert!(receipt.contains(".albatross/ui-receipt-demo.txt"));
+        assert!(receipt.contains("+1"));
+        assert!(receipt.contains("−1"));
+        assert!(receipt.contains("└ 1 hunk"));
+        assert!(!receipt.contains("path="));
+    }
+
+    #[test]
+    fn file_edit_creation_is_presented_as_created_not_edited() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({
+                "path": ".albatross/ui-receipt-demo.txt",
+                "edits": [{"old_text": "", "new_text": "alpha\nbeta"}]
+            }),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "created": true,
+                    "path": ".albatross/ui-receipt-demo.txt",
+                    "addedLines": 2,
+                    "removedLines": 0,
+                    "hunks": 1,
+                    "verified": true
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Created"));
+        assert!(!receipt.contains("Edited"));
+        assert!(receipt.contains("+2"));
+    }
+
+    #[test]
+    fn unverified_edit_receipt_keeps_the_disk_warning() {
+        let call = PendingCall {
+            name: "file_edit".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(
+                serde_json::json!({
+                    "edited": true,
+                    "path": "src/main.rs",
+                    "diff": "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new",
+                    "verified": false
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("1 hunk"));
+        assert!(receipt.contains("unverified — disk differs"));
+    }
+
+    #[test]
+    fn applied_patch_receipt_uses_file_change_vocabulary() {
+        let diff = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new";
+        let call = PendingCall {
+            name: "apply_patch".into(),
+            args: serde_json::json!({"patch": diff}),
+            output: Some(
+                serde_json::json!({
+                    "applied": true,
+                    "path": ".",
+                    "files": ["src/main.rs"],
+                    "diff": diff
+                })
+                .to_string(),
+            ),
+            duration: None,
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(receipt.contains("Patched"));
+        assert!(receipt.contains("src/main.rs"));
+        assert!(receipt.contains("+1"));
+        assert!(receipt.contains("−1"));
+        assert!(receipt.contains("1 hunk"));
+        assert!(!receipt.contains("patch="));
+    }
+
+    #[test]
+    fn fast_grouped_receipt_omits_duration_noise() {
+        let call = PendingCall {
+            name: "file_read".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            output: Some(r#"{"lines":41}"#.into()),
+            duration: Some(std::time::Duration::from_millis(999)),
+        };
+
+        let receipt = format_grouped_receipt(&call);
+
+        assert!(!receipt.contains("· 0.9s"));
+        assert!(!receipt.contains("· 1.0s"));
+    }
+
+    #[test]
     fn hidden_reasoning_does_not_close_streaming_answer() {
         let mut r = TuiRenderer::new(DisplayConfig::default());
         assert!(!r.reasoning_enabled());
@@ -1065,6 +2294,34 @@ mod verbose_tests {
 
         assert!(r.answer_wrap.is_some());
         r.end_turn();
+    }
+
+    #[test]
+    fn response_heading_is_emitted_once_per_turn() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+
+        let first = r.answer_opening();
+        let resumed = r.answer_opening();
+        r.end_turn();
+        let next_turn = r.answer_opening();
+
+        assert!(first.contains("response"));
+        assert!(!resumed.contains("response"));
+        assert!(next_turn.contains("response"));
+    }
+
+    #[test]
+    fn visible_reasoning_reuses_the_activity_slot_with_a_distinct_label() {
+        let r = TuiRenderer::new(DisplayConfig {
+            reasoning: true,
+            ..Default::default()
+        });
+
+        let opening = r.reasoning_opening();
+
+        assert!(opening.starts_with('\n'));
+        assert!(opening.contains("reasoning"));
+        assert!(!opening.contains("thinking"));
     }
 
     #[test]

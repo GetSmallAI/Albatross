@@ -35,6 +35,7 @@ use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
     format_test_failure_feedback, run_selected_tests, smart_test_selection, TestResult,
 };
+use crate::theme::{notice, NoticeKind};
 use crate::tools::{
     build_tools_for_names, select_tool_names, tool_output_mutated_workspace, ToolPreview,
     ToolRuntimeContext,
@@ -45,9 +46,7 @@ use crate::warmup::warmup;
 
 const RESET: crate::theme::Style = crate::theme::RESET;
 const DIM: crate::theme::Style = crate::theme::MUTED;
-const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const YELLOW: crate::theme::Style = crate::theme::WARN;
-const RED: crate::theme::Style = crate::theme::ERROR;
 const GRAY: crate::theme::Style = crate::theme::MUTED;
 
 pub struct TurnOptions {
@@ -55,6 +54,38 @@ pub struct TurnOptions {
     pub auto_verify_tests: bool,
     pub yolo_approve: bool,
     pub source: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelActivityAction {
+    Keep,
+    Replace(String),
+    Clear,
+}
+
+fn model_activity_action(
+    event: &AgentEvent,
+    reasoning_visible: bool,
+    renderer_manages_tools: bool,
+) -> ModelActivityAction {
+    match event {
+        AgentEvent::ModelRequestStarted => ModelActivityAction::Replace("Thinking".into()),
+        AgentEvent::Reasoning { .. } if !reasoning_visible => ModelActivityAction::Keep,
+        AgentEvent::ToolExecutionStarted { name, .. } if !renderer_manages_tools => {
+            ModelActivityAction::Replace(format!("Running {name}"))
+        }
+        AgentEvent::Text { .. }
+        | AgentEvent::ToolCall { .. }
+        | AgentEvent::ToolExecutionStarted { .. }
+        | AgentEvent::ToolExecutionFinished { .. }
+        | AgentEvent::ToolExecutionSkipped { .. }
+        | AgentEvent::ToolResult { .. }
+        | AgentEvent::ToolOutputCompacted { .. }
+        | AgentEvent::Reasoning { .. }
+        | AgentEvent::ContextCompacted { .. }
+        | AgentEvent::HookNotice(_)
+        | AgentEvent::StepLimitReached { .. } => ModelActivityAction::Clear,
+    }
 }
 
 #[allow(dead_code)]
@@ -167,8 +198,36 @@ fn format_cost_suffix(
     }
 }
 
-fn format_timing_suffix(metrics: &TurnMetrics) -> String {
-    metrics.format_footer_suffix()
+fn format_compact_cost_suffix(
+    turn_cost: Option<f64>,
+    backend_is_local: bool,
+    session_usd: f64,
+    has_unknown: bool,
+) -> String {
+    if turn_cost.is_none() && !backend_is_local {
+        if session_usd == 0.0 {
+            return String::new();
+        }
+        let session_prefix = if has_unknown { "≥" } else { "" };
+        return format!("{session_prefix}{} session", format_usd(session_usd));
+    }
+    format_cost_suffix(turn_cost, backend_is_local, session_usd, has_unknown)
+}
+
+fn format_compact_timing(metrics: &TurnMetrics, visible_actions: usize) -> String {
+    let mut parts = Vec::new();
+    if visible_actions > 0 {
+        let noun = if visible_actions == 1 {
+            "action"
+        } else {
+            "actions"
+        };
+        parts.push(format!("{visible_actions} {noun}"));
+    }
+    if metrics.total_ms > 0 {
+        parts.push(format!("{:.1}s", metrics.total_ms as f64 / 1000.0));
+    }
+    parts.join(" · ")
 }
 
 fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
@@ -177,11 +236,7 @@ fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
         .unwrap_or_default()
 }
 
-/// Join the non-empty footer parts with a single `" · "` separator, so
-/// individual suffix builders don't each bake in their own leading
-/// separator (which used to make empty-part handling error-prone).
-#[allow(clippy::too_many_arguments)]
-fn format_footer(
+struct TurnFooter<'a> {
     input_tokens: u32,
     output_tokens: u32,
     cached_input_tokens: u32,
@@ -190,51 +245,101 @@ fn format_footer(
     session_usd: f64,
     session_cost_has_unknown: bool,
     effort: Option<EffortLevel>,
-    metrics: &TurnMetrics,
-    path_suffix: &str,
-    scorecard_suffix: &str,
-    fable_suffix: &str,
-    model: &str,
-) -> String {
-    let mut parts = vec![
-        format!("{} in", format_tokens(input_tokens)),
-        format!("{} out", format_tokens(output_tokens)),
+    metrics: &'a TurnMetrics,
+    visible_actions: usize,
+    path_suffix: &'a str,
+    fable_suffix: &'a str,
+    model: &'a str,
+}
+
+/// Join non-empty footer parts at semantic boundaries and wrap them within the
+/// terminal width. The caller supplies one turn summary; layout details stay
+/// inside this module.
+fn format_footer(input: &TurnFooter<'_>) -> String {
+    format_footer_at_width(input, crate::theme::cols())
+}
+
+fn format_footer_at_width(input: &TurnFooter<'_>, width: usize) -> String {
+    let mut primary = vec![
+        format!("{} in", format_tokens(input.input_tokens)),
+        format!("{} out", format_tokens(input.output_tokens)),
     ];
     // Only surface cache reuse when the provider reported it, so local backends
     // (which never report cached tokens) don't get a misleading "0 cached".
-    if cached_input_tokens > 0 {
-        parts.push(format!("{} cached", format_tokens(cached_input_tokens)));
+    if input.cached_input_tokens > 0 {
+        primary.push(format!(
+            "{} cached",
+            format_tokens(input.cached_input_tokens)
+        ));
     }
-    let cost = format_cost_suffix(
-        turn_cost,
-        backend_is_local,
-        session_usd,
-        session_cost_has_unknown,
+    let timing = format_compact_timing(input.metrics, input.visible_actions);
+    if !timing.is_empty() {
+        primary.push(timing);
+    }
+    if !input.model.is_empty() {
+        primary.push(input.model.to_string());
+    }
+
+    let mut secondary = Vec::new();
+    let cost = format_compact_cost_suffix(
+        input.turn_cost,
+        input.backend_is_local,
+        input.session_usd,
+        input.session_cost_has_unknown,
     );
     if !cost.is_empty() {
-        parts.push(cost);
+        secondary.push(cost);
     }
-    let effort_part = format_effort_suffix(effort);
+    let effort_part = format_effort_suffix(input.effort);
     if !effort_part.is_empty() {
-        parts.push(effort_part);
+        secondary.push(effort_part);
     }
-    let timing = format_timing_suffix(metrics);
-    if !timing.is_empty() {
-        parts.push(timing);
+    if !input.path_suffix.is_empty() {
+        secondary.push(input.path_suffix.to_string());
     }
-    if !path_suffix.is_empty() {
-        parts.push(path_suffix.to_string());
+    if !input.fable_suffix.is_empty() {
+        secondary.push(input.fable_suffix.to_string());
     }
-    if !scorecard_suffix.is_empty() {
-        parts.push(scorecard_suffix.to_string());
+
+    let mut rows = wrap_footer_parts(&primary, width, "  ", "    ");
+    rows.extend(wrap_footer_parts(&secondary, width, "    ", "    "));
+    rows.into_iter()
+        .map(|row| format!("{GRAY}{row}{RESET}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wrap_footer_parts(
+    parts: &[String],
+    width: usize,
+    first_prefix: &str,
+    continuation_prefix: &str,
+) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
     }
-    if !fable_suffix.is_empty() {
-        parts.push(fable_suffix.to_string());
+    let width = width.max(20);
+    let mut rows = Vec::new();
+    let first_width = width.saturating_sub(crate::theme::visible_len(first_prefix));
+    let mut current = format!(
+        "{first_prefix}{}",
+        crate::theme::truncate_visible(&parts[0], first_width)
+    );
+    for part in &parts[1..] {
+        let candidate = format!("{current} · {part}");
+        if crate::theme::visible_len(&candidate) <= width {
+            current = candidate;
+        } else {
+            rows.push(current);
+            let part_width = width.saturating_sub(crate::theme::visible_len(continuation_prefix));
+            current = format!(
+                "{continuation_prefix}{}",
+                crate::theme::truncate_visible(part, part_width)
+            );
+        }
     }
-    if !model.is_empty() {
-        parts.push(model.to_string());
-    }
-    format!("{GRAY}  {}{RESET}", parts.join(" · "))
+    rows.push(current);
+    rows
 }
 
 fn prompt_fingerprint(
@@ -675,13 +780,11 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         &system_prompt,
         &active_tool_names,
     );
-    if std::env::var("WARMUP").as_deref() != Ok("false")
+    let model_activity = if std::env::var("WARMUP").as_deref() != Ok("false")
         && state.warmed_fingerprint != Some(fingerprint)
     {
-        let loader = Loader::start(
-            "Warming prompt cache".into(),
-            state.config.display.loader_style,
-        );
+        let mut activity =
+            Loader::start("Preparing prompt".into(), state.config.display.loader_style);
         let warm_result = warmup(
             &state.http,
             &state.backend,
@@ -691,13 +794,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &tool_defs,
         )
         .await;
-        loader.stop();
         if let Ok(ms) = warm_result {
             state.warmed_fingerprint = Some(fingerprint);
-            println!(
-                "  {DIM}re-warming prompt cache (backend/model/tools changed) · {:.0}ms{RESET}",
-                ms
-            );
             if let Ok(trace) = state.trace.lock() {
                 let _ = trace.append(TracePayload::Warmup {
                     duration_ms: ms as u64,
@@ -705,7 +803,11 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 });
             }
         }
-    }
+        activity.update("Thinking".into());
+        activity
+    } else {
+        Loader::start("Thinking".into(), state.config.display.loader_style)
+    };
 
     let initial =
         request_messages_with_project_context(&state.messages, project_context.as_deref());
@@ -716,11 +818,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let http_clone = state.http.clone();
     let trace = state.trace.clone();
 
-    let loader = Loader::start(
-        state.config.display.loader_text.clone(),
-        state.config.display.loader_style,
-    );
-    let mut loader_opt = Some(loader);
+    let mut loader_opt = Some(model_activity);
 
     let cancel = CancellationToken::new();
     let cancel_for_agent = cancel.clone();
@@ -734,8 +832,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             hits += 1;
             if hits == 1 {
                 cancel_for_signal.cancel();
-                eprintln!("\n  cancelling current turn… press Ctrl-C again to exit");
             } else {
+                crate::cursor::restore();
                 std::process::exit(130);
             }
         }
@@ -790,24 +888,27 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 
     let mut memory_changed = false;
     let loader_style = state.config.display.loader_style;
-    let default_loader_text = state.config.display.loader_text.clone();
+    let renderer_manages_tool_activity = state.renderer.manages_tool_activity();
+    let reasoning_visible = state.renderer.reasoning_enabled();
     let drain_fut = async {
         while let Some(e) = rx.recv().await {
-            if let Some(l) = loader_opt.take() {
-                l.stop();
+            match model_activity_action(&e, reasoning_visible, renderer_manages_tool_activity) {
+                ModelActivityAction::Keep => {}
+                ModelActivityAction::Clear => {
+                    if let Some(activity) = loader_opt.take() {
+                        activity.stop();
+                    }
+                }
+                ModelActivityAction::Replace(text) => {
+                    if let Some(activity) = loader_opt.as_mut() {
+                        activity.update(text);
+                    } else {
+                        loader_opt = Some(Loader::start(text, loader_style));
+                    }
+                }
             }
             if let AgentEvent::ToolCall { name, .. } = &e {
                 tool_calls.push(name.clone());
-                if let Some(loader) = loader_opt.as_mut() {
-                    loader.set_text(format!("Running {name}…"));
-                } else {
-                    loader_opt = Some(Loader::start(format!("Running {name}…"), loader_style));
-                }
-            }
-            if let AgentEvent::ToolResult { .. } = &e {
-                if let Some(loader) = loader_opt.as_mut() {
-                    loader.set_text(default_loader_text.clone());
-                }
             }
             if let AgentEvent::ToolResult { name, output, .. } = &e {
                 if tool_output_mutated_workspace(name, output) {
@@ -831,11 +932,24 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let before = state.messages.len();
     let (result, _) = tokio::join!(agent_fut, drain_fut);
     ctrl_task.abort();
+    let was_cancelled = cancel.is_cancelled();
 
     if let Some(l) = loader_opt.take() {
         l.stop();
     }
     state.renderer.end_turn();
+
+    if was_cancelled {
+        println!(
+            "{}",
+            notice(
+                NoticeKind::Warning,
+                "Turn cancelled",
+                Some("Your conversation is unchanged. Press Ctrl-C again at the composer to exit."),
+            )
+        );
+        return Err(crate::cancel::cancelled_error());
+    }
 
     let mut res = result?;
     if project_context.is_some() {
@@ -863,7 +977,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         if let Err(e) =
             rewrite_session_transcript(&state.session_dir, &mut state.session_path, &state.messages)
         {
-            println!("  {RED}✗{RESET} {DIM}session rewrite failed: {e}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Error,
+                    "Session transcript could not be saved",
+                    Some(&e.to_string()),
+                )
+            );
         }
         let _ = state.reset_trace_for_session();
     } else {
@@ -897,7 +1018,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         enabled: state.config.scorecard.enabled,
     }) {
         if state.renderer.verbose_enabled() {
-            println!("  {YELLOW}!{RESET} {DIM}scorecard turn not recorded: {e}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Scorecard turn was not recorded",
+                    Some(&e.to_string()),
+                )
+            );
         }
     }
     let catalog_cost = turn_cost_usd(
@@ -953,7 +1081,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     });
     if let Err(error) = append_event(&state.config.workspace_root, &receipt) {
         if state.renderer.verbose_enabled() {
-            println!("  {YELLOW}!{RESET} {DIM}route receipt not recorded: {error}{RESET}");
+            println!(
+                "{}",
+                notice(
+                    NoticeKind::Warning,
+                    "Route receipt was not recorded",
+                    Some(&error.to_string()),
+                )
+            );
         }
     }
 
@@ -968,7 +1103,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                 let files = checkpoint.file_count();
                 state.checkpoint_stack.push(checkpoint);
                 checkpoint_pushed = true;
-                println!("  {DIM}checkpoint saved ({files} file(s)) — /undo to revert{RESET}");
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Info,
+                        &format!("Checkpoint saved · {files} file(s)"),
+                        Some("Run /undo to revert this turn."),
+                    )
+                );
             }
         }
         match refresh_project_memory_after_write(&state.config) {
@@ -978,7 +1120,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             ),
             Ok(None) => {}
             Err(e) => {
-                println!("  {YELLOW}!{RESET} {DIM}project memory refresh skipped: {e}{RESET}")
+                println!(
+                    "{}",
+                    notice(
+                        NoticeKind::Warning,
+                        "Project memory refresh skipped",
+                        Some(&e.to_string()),
+                    )
+                )
             }
         }
         if opts.auto_verify_tests && state.config.mode == OperatorMode::Ship {
@@ -996,19 +1145,37 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                                 state.messages.push(verify_msg.clone());
                                 let _ = save_message(&state.session_path, &verify_msg);
                                 println!(
-                                    "  {YELLOW}tests:{RESET} {} failed (see context)",
-                                    result.failed
+                                    "{}",
+                                    notice(
+                                        NoticeKind::Warning,
+                                        &format!("{} test(s) failed", result.failed),
+                                        Some("Failure details were added to the model context."),
+                                    )
                                 );
                             } else if let Ok(snapshot) =
                                 collect_shipcheck(&state.config.workspace_root)
                             {
                                 if snapshot.ready_to_ship() {
-                                    println!("  {GREEN}✓{RESET} {DIM}ready for /handoff{RESET}");
+                                    println!(
+                                        "{}",
+                                        notice(
+                                            NoticeKind::Success,
+                                            "Ready for handoff",
+                                            Some("Run /handoff when you are ready."),
+                                        )
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                            println!("  {YELLOW}!{RESET} {DIM}auto-verify skipped: {e}{RESET}")
+                            println!(
+                                "{}",
+                                notice(
+                                    NoticeKind::Warning,
+                                    "Automatic verification skipped",
+                                    Some(&e.to_string()),
+                                )
+                            )
                         }
                     }
                 }
@@ -1047,12 +1214,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
-    let scorecard_suffix = crate::scorecard::format_scorecard_suffix(
-        &state.config.workspace_root,
-        state.config.scorecard.enabled,
-        state.config.scorecard.nudge_min_turns,
-    )
-    .unwrap_or_default();
     let fable_suffix = if state.config.fable.enabled
         && crate::fable_usage::is_fable_model(&state.config.fable, &state.model)
     {
@@ -1069,23 +1230,24 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     // One leading blank separates the quiet stats footer from the turn's
     // response and any checkpoint/test notices above it.
     println!();
+    let path_suffix = format_path_suffix(state);
     println!(
         "{}",
-        format_footer(
-            res.input_tokens,
-            res.output_tokens,
-            res.cached_input_tokens,
+        format_footer(&TurnFooter {
+            input_tokens: res.input_tokens,
+            output_tokens: res.output_tokens,
+            cached_input_tokens: res.cached_input_tokens,
             turn_cost,
-            state.config.backend.is_local(),
-            state.session_usd,
-            state.session_cost_has_unknown,
-            state.active_effort,
-            &metrics,
-            &format_path_suffix(state),
-            &scorecard_suffix,
-            &fable_suffix,
-            &state.model,
-        )
+            backend_is_local: state.config.backend.is_local(),
+            session_usd: state.session_usd,
+            session_cost_has_unknown: state.session_cost_has_unknown,
+            effort: state.active_effort,
+            metrics: &metrics,
+            visible_actions: tool_calls.len(),
+            path_suffix: &path_suffix,
+            fable_suffix: &fable_suffix,
+            model: &state.model,
+        })
     );
 
     Ok(TurnOutcome {
@@ -1100,6 +1262,118 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_footer(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_input_tokens: u32,
+        turn_cost: Option<f64>,
+        backend_is_local: bool,
+        session_usd: f64,
+        session_cost_has_unknown: bool,
+        effort: Option<EffortLevel>,
+        metrics: &TurnMetrics,
+        visible_actions: usize,
+        path_suffix: &str,
+        _scorecard_suffix: &str,
+        fable_suffix: &str,
+        model: &str,
+    ) -> String {
+        format_footer(&TurnFooter {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            turn_cost,
+            backend_is_local,
+            session_usd,
+            session_cost_has_unknown,
+            effort,
+            metrics,
+            visible_actions,
+            path_suffix,
+            fable_suffix,
+            model,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_footer_at_width(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_input_tokens: u32,
+        turn_cost: Option<f64>,
+        backend_is_local: bool,
+        session_usd: f64,
+        session_cost_has_unknown: bool,
+        effort: Option<EffortLevel>,
+        metrics: &TurnMetrics,
+        visible_actions: usize,
+        path_suffix: &str,
+        _scorecard_suffix: &str,
+        fable_suffix: &str,
+        model: &str,
+        width: usize,
+    ) -> String {
+        format_footer_at_width(
+            &TurnFooter {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+                turn_cost,
+                backend_is_local,
+                session_usd,
+                session_cost_has_unknown,
+                effort,
+                metrics,
+                visible_actions,
+                path_suffix,
+                fable_suffix,
+                model,
+            },
+            width,
+        )
+    }
+
+    #[test]
+    fn model_activity_routes_transient_and_permanent_events_without_overlap() {
+        assert_eq!(
+            model_activity_action(&AgentEvent::ModelRequestStarted, false, true),
+            ModelActivityAction::Replace("Thinking".into())
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::Reasoning {
+                    delta: "private chain".into(),
+                },
+                false,
+                true,
+            ),
+            ModelActivityAction::Keep
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::Text {
+                    delta: "answer".into(),
+                },
+                false,
+                true,
+            ),
+            ModelActivityAction::Clear
+        );
+        assert_eq!(
+            model_activity_action(
+                &AgentEvent::ToolExecutionStarted {
+                    name: "shell".into(),
+                    call_id: "call-1".into(),
+                    depth: 0,
+                },
+                false,
+                false,
+            ),
+            ModelActivityAction::Replace("Running shell".into())
+        );
+    }
     use crate::app_state::AppState;
     use crate::approval::ApprovalCache;
     use crate::backends::{BackendDescriptor, BackendName};
@@ -1316,8 +1590,8 @@ mod cost_tests {
     #[test]
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+        let footer = test_footer(
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1329,7 +1603,7 @@ mod cost_tests {
     }
 
     #[test]
-    fn footer_joins_all_present_parts_with_single_separator() {
+    fn footer_preserves_user_facing_context_without_scorecard_noise() {
         let metrics = TurnMetrics {
             steps: 2,
             ttft_ms: None,
@@ -1339,7 +1613,7 @@ mod cost_tests {
             total_ms: 1000,
             hit_step_limit: false,
         };
-        let footer = format_footer(
+        let footer = test_footer(
             500,
             120,
             0,
@@ -1349,23 +1623,214 @@ mod cost_tests {
             false,
             Some(EffortLevel::High),
             &metrics,
+            2,
             "path: main · 2 paths",
             "3 turn(s) tracked · /ship pr closes scorecard",
             "Fable 25.0k / 50.0k wk (50%)",
             "grok-4.5",
         );
-        assert!(footer.contains("500 in · 120 out · $0.01 this turn · $0.01 session · effort high"));
+        assert!(footer.contains("500 in · 120 out · 2 actions · 1.0s · grok-4.5"));
+        assert!(footer.contains("$0.01 this turn · $0.01 session"));
+        assert!(footer.contains("effort high"));
         assert!(footer.contains("path: main · 2 paths"));
-        assert!(footer.contains("3 turn(s) tracked"));
         assert!(footer.contains("Fable 25.0k / 50.0k wk (50%)"));
-        assert!(footer.ends_with(&format!("grok-4.5{RESET}")));
+        assert!(!footer.contains("3 turn(s) tracked"));
+        assert!(!footer.contains("/ship"));
+    }
+
+    #[test]
+    fn compact_footer_keeps_operational_jargon_out_of_normal_turns() {
+        let metrics = TurnMetrics {
+            steps: 2,
+            ttft_ms: Some(800),
+            model_ms: 1300,
+            tool_ms: 200,
+            approval_ms: 0,
+            total_ms: 1500,
+            hit_step_limit: false,
+        };
+
+        let footer = test_footer(
+            2700,
+            15,
+            2600,
+            None,
+            false,
+            0.0,
+            true,
+            None,
+            &metrics,
+            2,
+            "",
+            "6 turn(s) tracked · /ship pr closes scorecard",
+            "",
+            "grok-4.5",
+        );
+
+        assert!(footer.contains("2.7k in · 15 out · 2.6k cached"));
+        assert!(footer.contains("2 actions · 1.5s"));
+        assert!(!footer.contains("TTFT"));
+        assert!(!footer.contains("model 1.3s"));
+        assert!(!footer.contains("/ship"));
+        assert!(!footer.contains("scorecard"));
+        assert!(!footer.contains("turn(s) tracked"));
+    }
+
+    #[test]
+    fn compact_timing_reports_visible_actions_without_exposing_model_steps() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+
+        assert_eq!(format_compact_timing(&metrics, 1), "1 action · 2.5s");
+    }
+
+    #[test]
+    fn compact_timing_omits_model_steps_without_visible_actions() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+
+        assert_eq!(format_compact_timing(&metrics, 0), "2.5s");
+    }
+
+    #[test]
+    fn compact_footer_separates_primary_metrics_from_secondary_context() {
+        let metrics = TurnMetrics {
+            steps: 2,
+            total_ms: 1500,
+            ..TurnMetrics::default()
+        };
+
+        let footer = test_footer(
+            500,
+            120,
+            0,
+            Some(0.01),
+            false,
+            0.04,
+            false,
+            Some(EffortLevel::High),
+            &metrics,
+            2,
+            "path: main · 2 paths",
+            "",
+            "Fable 25.0k / 50.0k wk (50%)",
+            "grok-4.5",
+        );
+        let rows = footer.lines().collect::<Vec<_>>();
+
+        assert!(rows.len() >= 2, "primary receipt + secondary context");
+        assert!(rows[0].contains("500 in · 120 out · 2 actions · 1.5s · grok-4.5"));
+        assert!(!rows[0].contains('$'));
+        let secondary = rows[1..].join("\n");
+        assert!(secondary.contains("$0.01 this turn · $0.04 session"));
+        assert!(secondary.contains("effort high"));
+        assert!(secondary.contains("path: main · 2 paths"));
+        assert!(secondary.contains("Fable 25.0k / 50.0k wk (50%)"));
+    }
+
+    #[test]
+    fn compact_footer_omits_unknown_zero_cost_noise() {
+        let footer = test_footer(
+            2700,
+            15,
+            2600,
+            None,
+            false,
+            0.0,
+            true,
+            None,
+            &TurnMetrics::default(),
+            0,
+            "",
+            "",
+            "",
+            "grok-4.5",
+        );
+
+        assert!(!footer.contains("$?"));
+        assert!(!footer.contains("≥$0.00"));
+        assert_eq!(footer.lines().count(), 1);
+    }
+
+    #[test]
+    fn compact_footer_wraps_at_metric_boundaries_on_narrow_terminals() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            total_ms: 2500,
+            ..TurnMetrics::default()
+        };
+        let footer = test_footer_at_width(
+            12_700,
+            845,
+            11_900,
+            Some(0.013),
+            false,
+            0.094,
+            false,
+            None,
+            &metrics,
+            3,
+            "",
+            "",
+            "",
+            "grok-4.5",
+            42,
+        );
+
+        assert!(footer.lines().count() > 1);
+        assert!(
+            footer
+                .lines()
+                .all(|row| crate::theme::visible_len(row) <= 42),
+            "footer exceeded terminal width: {footer:?}"
+        );
+        assert!(footer.contains("12.7k in"));
+        assert!(footer.contains("845 out"));
+        assert!(footer.contains("11.9k cached"));
+        assert!(footer.contains("3 actions"));
+        assert!(footer.contains("2.5s"));
+    }
+
+    #[test]
+    fn compact_footer_truncates_one_oversized_metric_instead_of_terminal_wrapping() {
+        let footer = test_footer_at_width(
+            100,
+            20,
+            0,
+            None,
+            true,
+            0.0,
+            false,
+            None,
+            &TurnMetrics::default(),
+            0,
+            "",
+            "",
+            "",
+            "provider/a-very-long-versioned-model-name",
+            32,
+        );
+
+        assert!(footer.contains('…'));
+        assert!(
+            footer
+                .lines()
+                .all(|row| crate::theme::visible_len(row) <= 32),
+            "oversized footer metric wrapped: {footer:?}"
+        );
     }
 
     #[test]
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
-            100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
+        let footer = test_footer(
+            100, 50, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1375,7 +1840,7 @@ mod cost_tests {
     #[test]
     fn local_backend_footer_has_no_cost_part() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(
+        let footer = test_footer(
             100,
             50,
             0,
@@ -1385,6 +1850,7 @@ mod cost_tests {
             false,
             None,
             &metrics,
+            0,
             "",
             "",
             "",
@@ -1399,31 +1865,15 @@ mod cost_tests {
     fn footer_shows_cached_tokens_only_when_present() {
         let metrics = TurnMetrics::default();
         // Provider reported a cache hit: surface it between out and cost.
-        let hit = format_footer(
-            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
+        let hit = test_footer(
+            1200, 87, 900, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         assert!(hit.contains("1.2k in · 87 out · 900 cached"));
         // No cache hit reported: no "cached" part at all.
-        let miss = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+        let miss = test_footer(
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, 0, "", "", "", "",
         );
         assert!(!miss.contains("cached"));
-    }
-
-    #[test]
-    fn timing_suffix_includes_steps_and_model_time() {
-        let metrics = TurnMetrics {
-            steps: 3,
-            ttft_ms: Some(500),
-            model_ms: 1200,
-            tool_ms: 800,
-            approval_ms: 0,
-            total_ms: 2500,
-            hit_step_limit: false,
-        };
-        let s = format_timing_suffix(&metrics);
-        assert!(s.contains("3 steps"));
-        assert!(s.contains("model"));
     }
 
     #[test]
