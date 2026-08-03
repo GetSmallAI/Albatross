@@ -1,6 +1,6 @@
 [package]
 name = "albatross-cli"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 rust-version = "1.86"
 description = "Open source, terminal-first AI coding agent with fully transparent multi-model routing. Local (Ollama, LM Studio, MLX, llama.cpp) or cloud, your keys, one TUI."

@@ -20,7 +20,7 @@
   <a href="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/morganlinton/Albatross/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://crates.io/crates/albatross-cli"><img alt="crates.io" src="https://img.shields.io/crates/v/albatross-cli?label=crates.io&color=2563eb"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.86%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-2.2.0-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.3.0-111827">
   <img alt="Providers" src="https://img.shields.io/badge/providers-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Anthropic%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">

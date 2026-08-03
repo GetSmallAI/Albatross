@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-03
+
 ### Added
 
 - Added GPT-5.6 Sol, Terra, and Luna to the ChatGPT/Codex provider, with Sol as
