@@ -50,7 +50,7 @@ Type "/help"
 Enter
 Sleep 1.4s
 
-Type "/backend"
+Type "/provider"
 Enter
 Sleep 1.4s
 Type "q"
