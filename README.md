@@ -26,6 +26,14 @@
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
 
+<p align="center">
+  <img alt="Albatross writing and running a local coding session" src="docs/assets/demo/agent-session.gif" width="920">
+</p>
+
+<p align="center">
+  <a href="docs/assets/demo/agent-session.mp4">Session video (mp4)</a>
+</p>
+
 ---
 
 ## What it is
