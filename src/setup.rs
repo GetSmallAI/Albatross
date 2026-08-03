@@ -151,7 +151,7 @@ async fn prompt_backend(default: BackendName) -> Result<Option<BackendName>> {
         })
         .collect();
     let default_idx = backends.iter().position(|b| *b == default).unwrap_or(0);
-    let Some(idx) = select_from_list("Backend".into(), options, default_idx).await? else {
+    let Some(idx) = select_from_list("Provider".into(), options, default_idx).await? else {
         return Ok(None);
     };
     Ok(backends.get(idx).copied())
@@ -432,7 +432,7 @@ async fn probe_setup_backend(config: &AgentConfig) {
     let models = match with_probe_timeout(list_models(&http, &backend_desc)).await {
         Ok(models) => models,
         Err(e) => {
-            println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {e}{RESET}");
+            println!("  {YELLOW}!{RESET} {DIM}Provider not reachable: {e}{RESET}");
             println!("  {DIM}Hint: {}{RESET}", backend_hint(config.backend));
             return;
         }
@@ -460,7 +460,7 @@ async fn probe_setup_backend(config: &AgentConfig) {
         Err(e) => {
             println!("  {YELLOW}!{RESET} {DIM}chat probe failed: {e}{RESET}");
             println!(
-                "  {DIM}The config is saved. Check the model id or start the backend, then run /doctor.{RESET}"
+                "  {DIM}The config is saved. Check the model id or start the provider, then run /doctor.{RESET}"
             );
         }
     }
@@ -498,12 +498,12 @@ fn backend_hint(backend: BackendName) -> &'static str {
         BackendName::LlamaCpp => {
             "run `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja`."
         }
-        BackendName::Openrouter => "set `OPENROUTER_API_KEY` before using the OpenRouter backend.",
+        BackendName::Openrouter => "set `OPENROUTER_API_KEY` before using the OpenRouter provider.",
         BackendName::OpenAi => {
-            "set `OPENAI_API_KEY` before using the OpenAI backend (optionally `OPENAI_BASE_URL` for a compatible proxy)."
+            "set `OPENAI_API_KEY` before using the OpenAI provider (optionally `OPENAI_BASE_URL` for a compatible proxy)."
         }
         BackendName::Anthropic => {
-            "set `ANTHROPIC_API_KEY` before using the Anthropic backend (optionally `ANTHROPIC_BASE_URL` for a compatible proxy)."
+            "set `ANTHROPIC_API_KEY` before using the Anthropic provider (optionally `ANTHROPIC_BASE_URL` for a compatible proxy)."
         }
         BackendName::OpenAiCodex => {
             "run `/login openai-codex` to sign in with ChatGPT/Codex subscription OAuth."

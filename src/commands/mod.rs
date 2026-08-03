@@ -170,11 +170,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/login",
-        "Browser/device-code login (defaults to active OAuth backend: openai-codex, grok)",
+        "Browser/device-code login (defaults to active OAuth provider: openai-codex, grok)",
     ),
     (
         "/logout",
-        "Clear an OAuth login (defaults to active OAuth backend: openai-codex, grok)",
+        "Clear an OAuth login (defaults to active OAuth provider: openai-codex, grok)",
     ),
     (
         "/image",
@@ -198,12 +198,16 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/mcp", "List or trust project MCP servers"),
     (
-        "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, anthropic, openai-codex, grok); --default persists",
+        "/provider",
+        "Switch model provider (ollama, lm-studio, mlx, llamacpp, openrouter, openai, anthropic, openai-codex, grok); /backend remains an alias",
+    ),
+    (
+        "/theme",
+        "Set terminal palette (cyan, mono, green, amber); persists in agent.config.json",
     ),
     (
         "/model",
-        "List/pick a model; --default pins backend+model in agent.config.json",
+        "List/pick a model; --default pins provider+model in agent.config.json",
     ),
     (
         "/tools",
@@ -232,7 +236,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/doctor",
-        "Probe backend/tools/env; subcommands: recommend, bench, models, autotune",
+        "Probe provider/tools/env; subcommands: recommend, bench, models, autotune",
     ),
     ("/index", "Build, refresh, show, or clear project memory"),
     ("/map", "Print the project memory repo map or focused hits"),
@@ -303,7 +307,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/trace" => config_cmds::cmd_trace(&args, state),
         "/hooks" => hooks_cmds::cmd_hooks(&args, state)?,
         "/mcp" => mcp_cmds::cmd_mcp(&args, state).await?,
-        "/backend" => config_cmds::cmd_backend(&args, state).await?,
+        "/provider" | "/backend" => config_cmds::cmd_backend(&args, state).await?,
+        "/theme" => config_cmds::cmd_theme(&args, state),
         "/model" => config_cmds::cmd_model(&args, state).await?,
         "/tools" => config_cmds::cmd_tools(&args, state),
         "/compare" => config_cmds::cmd_compare(&args, state).await?,
@@ -379,7 +384,7 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
     let backend_desc = config.backend_descriptor();
     if let Err(e) = validate(&backend_desc) {
         println!(
-            "  {YELLOW}!{RESET} {DIM}Config saved, but active session stayed on the previous backend: {e}{RESET}"
+            "  {YELLOW}!{RESET} {DIM}Config saved, but active session stayed on the previous provider: {e}{RESET}"
         );
         return Ok(());
     }
@@ -884,7 +889,7 @@ async fn cmd_plan_route(
     };
     let backend_desc = state.config.backend_descriptor_for(planner.backend);
     if let Err(e) = validate(&backend_desc) {
-        println!("  {RED}✗{RESET} {DIM}planner backend is not ready: {e}{RESET}");
+        println!("  {RED}✗{RESET} {DIM}planner provider is not ready: {e}{RESET}");
         return Ok(());
     }
 
@@ -1411,7 +1416,7 @@ async fn cmd_plan_validate(state: &AppState, spec_path: &Path) -> Result<()> {
     }
     if should_refuse_cloud_handoff(state.backend.name, state.config.rubric.allow_cloud) {
         println!(
-            "  {RED}✗{RESET} {DIM}/plan validate sends the working diff to the model — run on a local backend or set rubric.allowCloud.{RESET}"
+            "  {RED}✗{RESET} {DIM}/plan validate sends the working diff to the model — run on a local provider or set rubric.allowCloud.{RESET}"
         );
         return Ok(());
     }
@@ -1628,6 +1633,14 @@ mod tests {
             trace_enabled: false,
             config,
         }
+    }
+
+    #[test]
+    fn completion_menu_prefers_provider_terminology() {
+        let commands = command_list();
+        assert!(commands.iter().any(|(name, _)| name == "/provider"));
+        assert!(commands.iter().any(|(name, _)| name == "/theme"));
+        assert!(!commands.iter().any(|(name, _)| name == "/backend"));
     }
 
     fn git(dir: &Path, args: &[&str]) {

@@ -1,4 +1,4 @@
-use crate::theme::{colors_enabled, rule, ACCENT, ACCENT_DEEP, BOLD, FADE_RAMP, MUTED, PAD, RESET};
+use crate::theme::{colors_enabled, fade_ramp, rule, ACCENT, ACCENT_DEEP, BOLD, MUTED, PAD, RESET};
 
 #[cfg(test)]
 const LOGO_NAME: &str = "ALBATROSS";
@@ -28,17 +28,17 @@ fn gradient_logo() -> String {
     if !colors_enabled() {
         return format!("{ACCENT_DEEP}{BOLD}{LOGO}{RESET}");
     }
-    // Cyan-to-teal half of the ramp only (51 → 23); the gray tail (indices
+    // Use the colorful half of the active theme's ramp; the gray tail (indices
     // 9..=11) is deliberately excluded here.
-    const CYAN_SEGMENT_END: usize = 8;
+    const COLOR_SEGMENT_END: usize = 8;
     let lines: Vec<&str> = LOGO.lines().collect();
     let last = lines.len().saturating_sub(1).max(1);
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        let idx = (i * CYAN_SEGMENT_END) / last;
+        let idx = (i * COLOR_SEGMENT_END) / last;
         out.push_str(&format!(
             "{BOLD}\x1b[38;5;{}m{line}{RESET}\n",
-            FADE_RAMP[idx]
+            fade_ramp()[idx]
         ));
     }
     out
@@ -52,12 +52,12 @@ pub fn print_banner(info: BannerInfo<'_>) {
         "{PAD}{BOLD}Albatross v{}{RESET}  {MUTED}— a small, terminal-first coding harness{RESET}",
         env!("CARGO_PKG_VERSION")
     );
-    println!("{}", row("backend", info.backend));
+    println!("{}", row("provider", info.backend));
     println!("{}", row("model", info.model));
     println!("{}", row("approval", info.approval));
     println!("{}", rule());
     println!(
-        "{PAD}{MUTED}/help{RESET} commands  {MUTED}·{RESET}  {MUTED}/backend /model{RESET} switch  {MUTED}·{RESET}  {MUTED}/exit{RESET} quit"
+        "{PAD}{MUTED}/help{RESET} commands  {MUTED}·{RESET}  {MUTED}/provider /model{RESET} switch  {MUTED}·{RESET}  {MUTED}/exit{RESET} quit"
     );
 }
 
@@ -80,9 +80,14 @@ mod tests {
                 crate::config::ColorMode::Never
             },
             false,
+            crate::config::ThemePreset::Cyan,
         );
         f();
-        crate::theme::init(crate::config::ColorMode::Always, false);
+        crate::theme::init(
+            crate::config::ColorMode::Always,
+            false,
+            crate::config::ThemePreset::Cyan,
+        );
     }
 
     #[test]

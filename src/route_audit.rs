@@ -247,11 +247,13 @@ pub fn effective_effort(
             };
             (Some(effective.to_string()), status)
         }
-        BackendName::OpenAiCodex
-        | BackendName::Ollama
-        | BackendName::LmStudio
-        | BackendName::Mlx
-        | BackendName::LlamaCpp => (None, "unsupported"),
+        BackendName::OpenAiCodex => match requested {
+            EffortLevel::None => (None, "disabled"),
+            effort => (Some(effort.as_str().to_string()), "applied"),
+        },
+        BackendName::Ollama | BackendName::LmStudio | BackendName::Mlx | BackendName::LlamaCpp => {
+            (None, "unsupported")
+        }
     }
 }
 
@@ -373,6 +375,14 @@ mod tests {
                 Some(EffortLevel::Low)
             ),
             (None, "unsupported")
+        );
+        assert_eq!(
+            effective_effort(
+                BackendName::OpenAiCodex,
+                "gpt-5.6-sol",
+                Some(EffortLevel::Max)
+            ),
+            (Some("max".into()), "applied")
         );
         assert_eq!(
             effective_effort(BackendName::Ollama, "qwen", Some(EffortLevel::High)),

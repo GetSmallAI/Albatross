@@ -272,7 +272,7 @@ pub(super) fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
         state.config.mode.as_str()
     );
     println!(
-        "  {DIM}backend{RESET}   {CYAN}{}{RESET}",
+        "  {DIM}provider{RESET}  {CYAN}{}{RESET}",
         state.config.backend.as_str()
     );
     println!("  {DIM}model{RESET}     {CYAN}{}{RESET}", state.model);

@@ -105,7 +105,7 @@ pub async fn run_iterate_loop(state: &mut AppState, opts: IterateOptions) -> Res
     }
     if should_refuse_cloud_handoff(state.backend.name, state.config.rubric.allow_cloud) {
         anyhow::bail!(
-            "/iterate sends workspace context to the evaluator — run it on a local backend or set rubric.allowCloud"
+            "/iterate sends workspace context to the evaluator — run it on a local provider or set rubric.allowCloud"
         );
     }
     let max_iters = opts.max_iters.clamp(1, MAX_ITERS_CEILING);

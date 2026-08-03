@@ -194,7 +194,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
     if let Some(m) = override_ {
         if matches!(b.name, BackendName::OpenAiCodex) {
             return crate::codex_responses::canonical_codex_model(m)
-                .unwrap_or("gpt-5.5")
+                .unwrap_or("gpt-5.6-sol")
                 .to_string();
         }
         if matches!(b.name, BackendName::Grok) {
@@ -217,7 +217,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         BackendName::Openrouter => "qwen/qwen-2.5-coder-32b-instruct",
         BackendName::OpenAi => "gpt-4o-mini",
         BackendName::Anthropic => "claude-sonnet-5",
-        BackendName::OpenAiCodex => "gpt-5.5",
+        BackendName::OpenAiCodex => "gpt-5.6-sol",
         BackendName::Grok => "grok-4.5",
     }
     .to_string()
@@ -395,19 +395,19 @@ mod tests {
     #[test]
     fn defaults_openai_codex_to_codex_model() {
         let model = default_model(&descriptor(BackendName::OpenAiCodex), None);
-        assert_eq!(model, "gpt-5.5");
+        assert_eq!(model, "gpt-5.6-sol");
     }
 
     #[test]
     fn ignores_non_codex_override_for_openai_codex() {
         let model = default_model(&descriptor(BackendName::OpenAiCodex), Some("gpt-5-codex"));
-        assert_eq!(model, "gpt-5.5");
+        assert_eq!(model, "gpt-5.6-sol");
     }
 
     #[test]
     fn normalizes_openai_codex_model_aliases() {
-        let model = default_model(&descriptor(BackendName::OpenAiCodex), Some("5.5"));
-        assert_eq!(model, "gpt-5.5");
+        let model = default_model(&descriptor(BackendName::OpenAiCodex), Some("5.6"));
+        assert_eq!(model, "gpt-5.6-sol");
     }
 
     #[test]

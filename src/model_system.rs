@@ -343,7 +343,10 @@ impl RouteCandidate {
 pub fn model_supports_effort(backend: BackendName, model: &str) -> bool {
     match backend {
         BackendName::Anthropic => crate::anthropic::model_supports_effort(model),
-        BackendName::Openrouter | BackendName::OpenAi | BackendName::Grok => true,
+        BackendName::Openrouter
+        | BackendName::OpenAi
+        | BackendName::OpenAiCodex
+        | BackendName::Grok => true,
         _ => false,
     }
 }
@@ -374,10 +377,13 @@ pub fn evaluate_coder_candidates(
         let mut exclusions = Vec::new();
         let mut warnings = Vec::new();
         if policy.local_only && !model.backend.is_local() {
-            exclusions.push("policy requires a local backend".into());
+            exclusions.push("policy requires a local provider".into());
         }
         if model.effort.is_some() && !model_supports_effort(model.backend, &model.model) {
-            let message = format!("{} does not apply requested effort", model.backend.as_str());
+            let message = format!(
+                "provider {} does not apply requested effort",
+                model.backend.as_str()
+            );
             if policy.require_effort_support {
                 exclusions.push(message);
             } else {
@@ -641,6 +647,6 @@ mod tests {
         assert!(candidates[1]
             .exclusions
             .iter()
-            .any(|reason| reason.contains("local backend")));
+            .any(|reason| reason.contains("local provider")));
     }
 }

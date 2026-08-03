@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use crate::backends::BackendDescriptor;
 use crate::cancel::CancellationToken;
 use crate::codex_oauth;
+use crate::model_system::EffortLevel;
 use crate::openai::{
     ChatMessage, ChatRequest, StreamChoice, StreamChunk, StreamDelta, ToolCallDelta,
     ToolFunctionDelta, Usage, UserContent, UserContentPart,
@@ -91,6 +92,10 @@ fn build_request_body(req: &ChatRequest<'_>) -> Value {
         "tool_choice": "auto",
         "parallel_tool_calls": true,
     });
+
+    if let Some(effort) = req.effort.filter(|effort| *effort != EffortLevel::None) {
+        body["reasoning"] = json!({ "effort": effort.as_str() });
+    }
 
     // Pi's ChatGPT/Codex OAuth provider does not send `max_output_tokens` to
     // `chatgpt.com/backend-api/codex/responses`; the backend rejects it with
@@ -494,6 +499,9 @@ where
 
 pub fn codex_model_list() -> Vec<String> {
     vec![
+        "gpt-5.6-sol".into(),
+        "gpt-5.6-terra".into(),
+        "gpt-5.6-luna".into(),
         "gpt-5.5".into(),
         "gpt-5.4".into(),
         "gpt-5.4-mini".into(),
@@ -501,11 +509,14 @@ pub fn codex_model_list() -> Vec<String> {
     ]
 }
 
-/// Canonical ChatGPT/Codex OAuth model ids from Pi's current openai-codex
-/// catalog.  Accept a few shorthand aliases because users often type `5.5`,
-/// but never send those aliases over the wire.
+/// Canonical ChatGPT/Codex OAuth model ids. Accept shorthand aliases because
+/// users often type `5.6` or a tier name, but never send those aliases over
+/// the wire.
 pub fn canonical_codex_model(model: &str) -> Option<&'static str> {
     match model.trim() {
+        "gpt-5.6" | "5.6" | "gpt-5.6-sol" | "5.6-sol" | "sol" => Some("gpt-5.6-sol"),
+        "gpt-5.6-terra" | "5.6-terra" | "terra" => Some("gpt-5.6-terra"),
+        "gpt-5.6-luna" | "5.6-luna" | "luna" => Some("gpt-5.6-luna"),
         "gpt-5.5" | "5.5" => Some("gpt-5.5"),
         "gpt-5.4" | "5.4" => Some("gpt-5.4"),
         "gpt-5.4-mini" | "5.4-mini" => Some("gpt-5.4-mini"),
@@ -550,24 +561,29 @@ mod tests {
             },
         }];
         let req = ChatRequest {
-            model: "5.5",
+            model: "5.6",
             messages: &messages,
             tools: Some(&tools),
             stream: true,
             stream_options: None,
             max_tokens: None,
             prompt_cache_key: None,
-            effort: None,
+            effort: Some(EffortLevel::Max),
         };
         let body = build_request_body(&req);
         assert_eq!(body["instructions"], "sys");
-        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["model"], "gpt-5.6-sol");
+        assert_eq!(body["reasoning"]["effort"], "max");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "grep");
     }
 
     #[test]
     fn canonicalizes_pi_codex_oauth_models_and_aliases() {
+        assert_eq!(canonical_codex_model("gpt-5.6"), Some("gpt-5.6-sol"));
+        assert_eq!(canonical_codex_model("sol"), Some("gpt-5.6-sol"));
+        assert_eq!(canonical_codex_model("terra"), Some("gpt-5.6-terra"));
+        assert_eq!(canonical_codex_model("luna"), Some("gpt-5.6-luna"));
         assert_eq!(canonical_codex_model("gpt-5.5"), Some("gpt-5.5"));
         assert_eq!(canonical_codex_model("5.5"), Some("gpt-5.5"));
         assert_eq!(canonical_codex_model("gpt-5-codex"), None);

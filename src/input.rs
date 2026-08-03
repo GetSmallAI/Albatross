@@ -147,6 +147,35 @@ fn completion_matches<'a>(
     matches
 }
 
+fn selected_completion_name(
+    chars: &[char],
+    cursor: usize,
+    commands: &[(String, String)],
+    selected: usize,
+    dismissed: bool,
+) -> Option<String> {
+    let line: String = chars.iter().collect();
+    let matches = completion_matches(&line, cursor, chars.len(), commands, dismissed);
+    (!matches.is_empty()).then(|| matches[selected.min(matches.len() - 1)].0.clone())
+}
+
+fn park_input_cursor(output: &mut String, prompt_cols: usize, cursor: usize, term_cols: usize) {
+    let cols = term_cols.max(1);
+    let offset = prompt_cols + cursor;
+    let row = offset / cols;
+    let col = offset % cols;
+    // Restore the anchor saved immediately before the prompt. Absolute
+    // placement from that anchor is stable even after the input wraps across
+    // multiple terminal rows.
+    output.push_str("\x1b[u");
+    if row > 0 {
+        output.push_str(&format!("\x1b[{row}B"));
+    }
+    if col > 0 {
+        output.push_str(&format!("\x1b[{col}C"));
+    }
+}
+
 /// Build the full redraw string for the input line plus (optionally) the
 /// completion menu, leaving the cursor parked at the logical edit position.
 ///
@@ -181,8 +210,10 @@ fn render_input(
         .to_string();
 
     let mut s = String::new();
-    // Clear current line + everything below (removes a previously drawn menu).
-    s.push_str("\r\x1b[0J");
+    // Restore the anchor saved immediately before the prompt, then clear the
+    // complete prior frame. Clearing from the current physical row leaves old
+    // rows behind once a long prompt wraps, which produced repeated sentences.
+    s.push_str("\x1b[u\x1b[0J");
     s.push_str(prompt);
     s.push_str(&display);
     if !ghost.is_empty() {
@@ -190,11 +221,7 @@ fn render_input(
     }
 
     if matches.is_empty() {
-        // No menu: park the cursor at the logical position.
-        let back = ghost.chars().count() + chars.len().saturating_sub(cursor);
-        if back > 0 {
-            s.push_str(&format!("\x1b[{back}D"));
-        }
+        park_input_cursor(&mut s, prompt_cols, cursor, term_cols);
         return s;
     }
 
@@ -240,12 +267,10 @@ fn render_input(
         ));
         rows += 1;
     }
-    // Move cursor back up to the input line, then to the logical column.
-    s.push_str(&format!("\x1b[{rows}A\r"));
-    let col = prompt_cols + cursor;
-    if col > 0 {
-        s.push_str(&format!("\x1b[{col}C"));
-    }
+    // Restore the saved prompt anchor and park at the logical edit position.
+    // This remains correct when the prompt itself spans several physical rows.
+    let _ = rows;
+    park_input_cursor(&mut s, prompt_cols, cursor, term_cols);
     s
 }
 
@@ -287,7 +312,9 @@ fn read_plain_outcome(
     commands: &[(String, String)],
 ) -> Result<ReadLineOutcome> {
     let mut out = std::io::stdout();
-    write!(out, "{prompt}")?;
+    // Save an immutable redraw anchor before the prompt. Every redraw restores
+    // this position, clears the old frame, and paints from the same origin.
+    write!(out, "\x1b[s{prompt}")?;
     out.flush()?;
     crossterm::terminal::enable_raw_mode()?;
     let prompt_cols = crate::theme::visible_len(prompt);
@@ -329,18 +356,6 @@ fn read_plain_outcome(
             let line: String = chars.iter().collect();
             completion_matches(&line, cursor, chars.len(), commands, dismissed).len()
         };
-        // Name of the currently selected completion, if the menu is open.
-        let selected_name =
-            |chars: &[char], cursor: usize, sel: usize, dismissed: bool| -> Option<String> {
-                let line: String = chars.iter().collect();
-                let m = completion_matches(&line, cursor, chars.len(), commands, dismissed);
-                if m.is_empty() {
-                    None
-                } else {
-                    Some(m[sel.min(m.len() - 1)].0.clone())
-                }
-            };
-
         loop {
             if let Event::Key(KeyEvent {
                 code,
@@ -354,18 +369,29 @@ fn read_plain_outcome(
                 }
                 if let Some(outcome) = control_key_outcome(code, modifiers) {
                     // See the Enter branch: `\r\n`, not `\n`, while raw mode is on.
-                    redraw(&mut out, &chars, cursor, sel, true)?;
+                    redraw(&mut out, &chars, chars.len(), sel, true)?;
                     write!(out, "\r\n")?;
                     out.flush()?;
                     return Ok(outcome);
                 }
                 match code {
                     KeyCode::Enter => {
+                        if let Some(name) =
+                            selected_completion_name(&chars, cursor, commands, sel, dismissed)
+                        {
+                            chars = name.chars().collect();
+                            chars.push(' ');
+                            cursor = chars.len();
+                            sel = 0;
+                            dismissed = false;
+                            redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                            continue;
+                        }
                         // Clear any open menu, then drop to the next line. Raw mode
                         // is still active here, so a bare `\n` only line-feeds and
                         // leaves the cursor in the input's last column — `\r` returns
                         // it to column 0 so the caller's output isn't shifted right.
-                        redraw(&mut out, &chars, cursor, sel, true)?;
+                        redraw(&mut out, &chars, chars.len(), sel, true)?;
                         write!(out, "\r\n")?;
                         out.flush()?;
                         return Ok(ReadLineOutcome::Line(chars.iter().collect()));
@@ -407,7 +433,9 @@ fn read_plain_outcome(
                     // Tab accepts the selected completion (+ trailing space, ready
                     // for args). Right at end-of-line accepts it without the space.
                     KeyCode::Tab => {
-                        if let Some(name) = selected_name(&chars, cursor, sel, dismissed) {
+                        if let Some(name) =
+                            selected_completion_name(&chars, cursor, commands, sel, dismissed)
+                        {
                             chars = name.chars().collect();
                             chars.push(' ');
                             cursor = chars.len();
@@ -417,7 +445,9 @@ fn read_plain_outcome(
                         }
                     }
                     KeyCode::Right => {
-                        if let Some(name) = selected_name(&chars, cursor, sel, dismissed) {
+                        if let Some(name) =
+                            selected_completion_name(&chars, cursor, commands, sel, dismissed)
+                        {
                             chars = name.chars().collect();
                             cursor = chars.len();
                             sel = 0;
@@ -752,11 +782,11 @@ mod tests {
         }
         // The selected row is marked with the accent pointer.
         assert!(out.contains("▸"), "selected marker missing: {out:?}");
-        // It clears below and restores the cursor up onto the input line.
-        assert!(out.starts_with("\r\x1b[0J"));
+        // It restores the saved prompt anchor before clearing and repainting.
+        assert!(out.starts_with("\x1b[u\x1b[0J"));
         assert!(
-            out.contains("\x1b[3A"),
-            "cursor moves back up 3 rows: {out:?}"
+            out.ends_with("\x1b[u\x1b[5C"),
+            "cursor returns to the logical input column: {out:?}"
         );
     }
 
@@ -766,6 +796,30 @@ mod tests {
         let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 0, false, 80);
         assert!(!out.contains('▸'));
         assert!(!out.contains("\r\n"));
+    }
+
+    #[test]
+    fn wrapped_input_redraws_from_anchor_and_parks_on_wrapped_row() {
+        let chars: Vec<char> = "123456789012345".chars().collect();
+        let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 0, false, 10);
+        assert!(out.starts_with("\x1b[u\x1b[0J"));
+        assert!(
+            out.ends_with("\x1b[u\x1b[1B\x1b[7C"),
+            "15 input columns plus a 2-column prompt should wrap once: {out:?}"
+        );
+    }
+
+    #[test]
+    fn selected_completion_can_be_accepted_with_enter_or_tab() {
+        let chars: Vec<char> = "/co".chars().collect();
+        assert_eq!(
+            selected_completion_name(&chars, chars.len(), &cmds(), 1, false).as_deref(),
+            Some("/compare")
+        );
+        assert_eq!(
+            selected_completion_name(&chars, chars.len(), &cmds(), 0, true),
+            None
+        );
     }
 
     #[test]

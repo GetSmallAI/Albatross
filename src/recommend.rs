@@ -179,7 +179,7 @@ fn score_candidate(spec: &HardwareSpec, candidate: ModelCandidate) -> ModelRecom
 
     if candidate.installed {
         score += 220;
-        rationale.push("installed on a reachable backend".into());
+        rationale.push("installed on a reachable provider".into());
     } else if candidate.is_default {
         score += 70;
         rationale.push("default model for your detected hardware".into());
@@ -229,7 +229,7 @@ fn score_candidate(spec: &HardwareSpec, candidate: ModelCandidate) -> ModelRecom
 
     if !candidate.backend.is_local() {
         score -= 40;
-        rationale.push("cloud backend".into());
+        rationale.push("cloud provider".into());
     }
 
     let confidence = confidence_for(&candidate, fit);

@@ -702,7 +702,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         if let Ok(ms) = warm_result {
             state.warmed_fingerprint = Some(fingerprint);
             println!(
-                "  {DIM}re-warming prompt cache (backend/model/tools changed) · {:.0}ms{RESET}",
+                "  {DIM}re-warming prompt cache (provider/model/tools changed) · {:.0}ms{RESET}",
                 ms
             );
             if let Ok(trace) = state.trace.lock() {

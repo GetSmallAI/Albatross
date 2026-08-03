@@ -8,7 +8,7 @@ use crate::backends::{BackendDescriptor, BackendName, OpenRouterConfig};
 use crate::model_system::ModelSystemConfig;
 
 /// Project-local config file read by [`load_config`] and updated by
-/// `/backend --default` / `/model --default`.
+/// `/provider --default` (`/backend` alias) / `/model --default`.
 pub const AGENT_CONFIG_PATH: &str = "agent.config.json";
 
 /// Per-project scratch directory holding `spec.md`, `plan.json`, `rubric.md`,
@@ -176,6 +176,36 @@ pub enum ColorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ThemePreset {
+    Cyan,
+    Mono,
+    Green,
+    Amber,
+}
+
+impl ThemePreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Mono => "mono",
+            Self::Green => "green",
+            Self::Amber => "amber",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cyan" | "turquoise" | "default" => Some(Self::Cyan),
+            "mono" | "monochrome" | "black-white" | "black-and-white" => Some(Self::Mono),
+            "green" | "matrix" => Some(Self::Green),
+            "amber" | "orange" | "classic" => Some(Self::Amber),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutsideWorkspace {
     Prompt,
     Deny,
@@ -218,6 +248,8 @@ pub struct DisplayConfig {
     pub event_log: crate::turn_trace::EventLogConfig,
     #[serde(default = "default_color_mode")]
     pub color: ColorMode,
+    #[serde(default = "default_theme_preset")]
+    pub theme: ThemePreset,
     #[serde(default)]
     pub ascii: bool,
 }
@@ -240,6 +272,9 @@ fn default_loader_style() -> LoaderStyle {
 fn default_color_mode() -> ColorMode {
     ColorMode::Auto
 }
+fn default_theme_preset() -> ThemePreset {
+    ThemePreset::Cyan
+}
 
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -252,6 +287,7 @@ impl Default for DisplayConfig {
             show_banner: true,
             event_log: crate::turn_trace::EventLogConfig::default(),
             color: default_color_mode(),
+            theme: default_theme_preset(),
             ascii: false,
         }
     }
@@ -1216,6 +1252,48 @@ pub fn persist_backend_model_defaults(
     Ok(())
 }
 
+/// Surgically persist the display theme while preserving every other project
+/// setting. `/theme` uses this so a live palette choice survives restart.
+pub fn persist_display_theme(path: &Path, theme: ThemePreset) -> Result<()> {
+    let mut root = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow!("could not read {}: {e}", path.display()))?;
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("could not merge {}: invalid JSON ({e})", path.display()))?;
+        match parsed {
+            Value::Object(map) => Value::Object(map),
+            _ => bail!(
+                "could not merge {}: root must be a JSON object",
+                path.display()
+            ),
+        }
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+
+    let Some(obj) = root.as_object_mut() else {
+        bail!(
+            "could not merge {}: root must be a JSON object",
+            path.display()
+        );
+    };
+    let display = obj
+        .entry("display")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(display) = display.as_object_mut() else {
+        bail!(
+            "could not merge {}: display must be a JSON object",
+            path.display()
+        );
+    };
+    display.insert("theme".into(), json!(theme.as_str()));
+
+    let body = serde_json::to_string_pretty(&root)?;
+    std::fs::write(path, format!("{body}\n"))
+        .map_err(|e| anyhow!("could not write {}: {e}", path.display()))?;
+    Ok(())
+}
+
 pub fn load_config() -> AgentConfig {
     let mut config = AgentConfig::default();
     let dotenv = dotenv_values();
@@ -1633,6 +1711,23 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"[1, 2, 3]"#);
+    }
+
+    #[test]
+    fn persist_display_theme_creates_display_and_preserves_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+        std::fs::write(
+            &path,
+            r#"{"backend":"ollama","display":{"showBanner":false}}"#,
+        )
+        .unwrap();
+
+        persist_display_theme(&path, ThemePreset::Amber).unwrap();
+        let merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["backend"], "ollama");
+        assert_eq!(merged["display"]["showBanner"], false);
+        assert_eq!(merged["display"]["theme"], "amber");
     }
 
     #[test]

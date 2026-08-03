@@ -8,7 +8,7 @@
   <a href="#install">Install</a> &middot;
   <a href="#run-it">Run it</a> &middot;
   <a href="#first-session">First session</a> &middot;
-  <a href="#backends">Backends</a> &middot;
+  <a href="#providers">Providers</a> &middot;
   <a href="#tools-and-commands">Tools &amp; commands</a> &middot;
   <a href="#cost-and-credentials">Cost &amp; credentials</a> &middot;
   <a href="#going-further">Going further</a> &middot;
@@ -21,7 +21,7 @@
   <a href="https://crates.io/crates/albatross-cli"><img alt="crates.io" src="https://img.shields.io/crates/v/albatross-cli?label=crates.io&color=2563eb"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.86%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-2.2.0-111827">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Anthropic%20%7C%20Grok-2563eb">
+  <img alt="Providers" src="https://img.shields.io/badge/providers-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Anthropic%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
@@ -37,7 +37,7 @@ ships with the usual tool kit — read, edit, grep, shell, run tests — plus a
 few that aren't usual:
 
 - **Local or cloud, one TUI.** Switch providers mid-session with
-  `/backend <name>` — the tools, commands, and session log don't change.
+  `/provider <name>` — the tools, commands, and session log don't change.
 - **Per-turn cost on the status line.** `$0.003 this turn · $0.41 session`
   when pricing is known or reported by the provider. Local turns just show
   tokens.
@@ -109,10 +109,10 @@ albatross
 > From a source checkout without installing, use `cargo run --release` instead.
 
 The first launch runs a short setup wizard (it writes `agent.config.json` —
-backend, model, approval policy). Skip it with `ALBATROSS_NO_WIZARD=true`.
+provider, model, approval policy). Skip it with `ALBATROSS_NO_WIZARD=true`.
 Every launch after that opens straight into a session.
 
-Albatross talks to **one backend at a time** — pick the path that fits.
+Albatross talks to **one provider at a time** — pick the path that fits.
 
 ### Path A — Cloud API key
 
@@ -129,7 +129,7 @@ Albatross talks to **one backend at a time** — pick the path that fits.
    ```
 
 2. Launch, then select the provider in the first-run wizard (or any time with
-   `/backend anthropic`):
+   `/provider anthropic`):
 
    ```bash
    albatross
@@ -140,7 +140,7 @@ Prefer not to put the key in your environment? Launch first, then run
 file under `~/.config/albatross/`. Cost per turn and per session shows
 live on the status line.
 
-The Anthropic backend uses the documented Claude API and your
+The Anthropic provider uses the documented Claude API and your
 `ANTHROPIC_API_KEY`. It does **not** offer Claude.ai OAuth or use a Pro, Max,
 Team, or Enterprise subscription allowance; Anthropic's
 [Agent SDK guidance](https://code.claude.com/docs/en/agent-sdk/overview) requires
@@ -154,7 +154,7 @@ log in with OAuth inside the TUI:
 
 ```text
 /login openai-codex
-/backend openai-codex
+/provider openai-codex
 ```
 
 This is intentionally separate from `/auth set openai`: `openai` uses an
@@ -169,7 +169,7 @@ device-code OAuth, with no `XAI_API_KEY`:
 
 ```text
 /login grok
-/backend grok
+/provider grok
 ```
 
 Pick **1) Browser login** (opens the system browser + local callback) or
@@ -190,17 +190,17 @@ as pi — it does not scrape xAI's full `/models` list.
    ollama pull qwen2.5-coder:7b
    ```
 
-2. Launch — Ollama is the default backend, so there's nothing else to set:
+2. Launch — Ollama is the default provider, so there's nothing else to set:
 
    ```bash
    albatross
    ```
 
-LM Studio, MLX, and llama.cpp work the same way — see [Backends](#backends)
+LM Studio, MLX, and llama.cpp work the same way — see [Providers](#providers)
 for their ports and start commands.
 
-> **Tip:** switch backends mid-session with `/backend <name>`, and run
-> `/doctor` if a backend won't connect.
+> **Tip:** switch providers mid-session with `/provider <name>`, and run
+> `/doctor` if a provider won't connect. `/backend` remains an alias.
 
 ---
 
@@ -259,9 +259,9 @@ A handful of moves worth knowing right away:
 
 ---
 
-## Backends
+## Providers
 
-| Backend | Default URL | Notes |
+| Provider | Default URL | Notes |
 |---------|-------------|-------|
 | `ollama` | `http://localhost:11434/v1` | Easiest setup; mature tool-call templates |
 | `lm-studio` | `http://localhost:1234/v1` | GUI model browser; explicit load / unload |
@@ -273,27 +273,27 @@ A handful of moves worth knowing right away:
 | `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
 | `grok` | `https://cli-chat-proxy.grok.com/v1` | SuperGrok / X Premium+ OAuth via `/login grok` (browser or device-code) |
 
-Switch at runtime with `/backend <name>`. Endpoint overrides:
+Switch at runtime with `/provider <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
 `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_CODEX_BASE_URL`. The Grok OAuth proxy is fixed to
 xAI's first-party host so subscription tokens cannot be redirected elsewhere.
-API backends require an API key (set via [`/auth`](#cost-and-credentials) or
+API providers require an API key (set via [`/auth`](#cost-and-credentials) or
 env var); `openai-codex` requires `/login openai-codex`; `grok` requires
 `/login grok`.
 
-### Default model per backend
+### Default model per provider
 
-Each backend has one sensible default; local backends default to a 7B coder
+Each provider has one sensible default; local providers default to a 7B coder
 that runs on modest hardware. Override any time with `/model`, `AGENT_MODEL`,
-or `modelOverride` in your config. Append `--default` to `/model` or `/backend`
+or `modelOverride` in your config. Append `--default` to `/model` or `/provider`
 to write the choice into `agent.config.json` (surgical merge: only `backend` and
-`modelOverride`). `/model --default` pins the active model; `/backend --default`
-pins the active backend and clears `modelOverride` so the next launch uses that
-backend's built-in default model. In the interactive pickers you can also append
+`modelOverride`). `/model --default` pins the active model; `/provider --default`
+pins the active provider and clears `modelOverride` so the next launch uses that
+provider's built-in default model. In the interactive pickers you can also append
 answer the `y/N` save prompt after choosing; each entry is tagged `(selected)`
 for the live session choice and `(default)` for what's persisted on disk.
 
-| Backend | Default model |
+| Provider | Default model |
 |---------|---------------|
 | `ollama` | `qwen2.5-coder:7b` |
 | `lm-studio` | `qwen2.5-coder-7b-instruct` |
@@ -302,7 +302,7 @@ for the live session choice and `(default)` for what's persisted on disk.
 | `openrouter` | `qwen/qwen-2.5-coder-32b-instruct` |
 | `openai` | `gpt-4o-mini` |
 | `anthropic` | `claude-sonnet-5` |
-| `openai-codex` | `gpt-5.5` |
+| `openai-codex` | `gpt-5.6-sol` |
 | `grok` | `grok-4.5` |
 
 ### Recommend the right model for your box
@@ -396,14 +396,16 @@ this exact call`. The session cache resets on `/new`.
 /play fix-failing-test           bundled demo in an isolated sandbox
 ```
 
-**Backend, model, tools**
+**Provider, model, tools**
 ```
-/backend <name> [--default]  switch backend; --default writes agent.config.json
-/model [id] [--default]      list / pick a model; --default pins backend+model
+/provider <name> [--default] switch provider; --default writes agent.config.json
+/backend <name> [--default]  compatibility alias for /provider
+/model [id] [--default]      list / pick a model; --default pins provider+model
+/theme [name]                show/set cyan, mono, green, or amber palette
 /tools auto|fixed|<…>  show or set the active tool pool
 /auth                  manage API keys and OAuth credentials
-/login [provider]      sign in (defaults to active OAuth backend)
-/logout [provider]     clear stored OAuth login (defaults to active OAuth backend)
+/login [provider]      sign in (defaults to active OAuth provider)
+/logout [provider]     clear stored OAuth login (defaults to active OAuth provider)
 /login openai-codex    sign in with ChatGPT/Codex subscription OAuth
 /logout openai-codex   clear the stored ChatGPT/Codex login
 /login grok            sign in with SuperGrok / X Premium+ OAuth
@@ -416,6 +418,7 @@ this exact call`. The session cache resets on `/new`.
 /mcp                   list or trust project MCP servers
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 /fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
+/route                 open the guided routing menu
 /route select|apply    select or apply a configured multi-model stack route
 /route explain         explain the latest (or named) route and every linked call
 /route history [N]     show recent durable route decisions
@@ -435,7 +438,7 @@ this exact call`. The session cache resets on `/new`.
 /context               show prompt budget, model limit, auto-guard status
 /compact               summarize older turns (auto-runs at threshold)
 /reset                 write a continuation handoff and start a fresh session
-/doctor [--deep]       probe backend, tools, streaming, capabilities
+/doctor [--deep]       probe provider, tools, streaming, capabilities
 /doctor models         show cached per-model capability + benchmark records
 /doctor autotune       pick the best cached local model (add `apply` to switch)
 /doctor recommend      rank models for your hardware
@@ -451,7 +454,7 @@ Run `/help` in the harness for the full list with descriptions.
 
 ### Credentials with `/auth` and `/login`
 
-API-key cloud backends authenticate with API keys. Paste them once and
+API-key cloud providers authenticate with API keys. Paste them once and
 Albatross stores them at `~/.config/albatross/auth.json` (mode `0600`).
 Environment variables always win at lookup time, so CI and scripted users see
 no change in behavior.
@@ -462,16 +465,16 @@ no change in behavior.
 /auth set anthropic      paste your Anthropic API key
 /auth set openrouter     paste your OpenRouter key
 /auth clear openai       remove from the file (env stays for this session)
-/login                   browser/device-code login for the active OAuth backend
-/logout                  clear stored login for the active OAuth backend
+/login                   browser/device-code login for the active OAuth provider
+/logout                  clear stored login for the active OAuth provider
 /login openai-codex      browser/device-code login with ChatGPT/Codex
 /logout openai-codex     remove the stored OAuth credential
 /login grok              browser/device-code login with SuperGrok / X Premium+
 /logout grok             remove the stored Grok OAuth credential
 ```
 
-Bare `/login` and `/logout` use the **active OAuth backend** (`grok` or
-`openai-codex`). On a non-OAuth backend (or via `/auth login` with no
+Bare `/login` and `/logout` use the **active OAuth provider** (`grok` or
+`openai-codex`). On a non-OAuth provider (or via `/auth login` with no
 provider), pass the provider explicitly.
 
 
@@ -522,9 +525,9 @@ value persisted in `agent.config.json` `(default)`:
   ↑/↓ move · Enter select · 1-9 jump · q cancel
 ```
 
-After an interactive `/model` or `/backend` choice, answer the `y/N` prompt to
+After an interactive `/model` or `/provider` choice, answer the `y/N` prompt to
 save it as the project default. Direct forms such as `/model gpt-4o --default`
-and `/backend ollama --default` still switch and persist in one command.
+and `/provider ollama --default` still switch and persist in one command.
 
 ### Claude Fable tracker
 
@@ -950,7 +953,10 @@ token counts, and reported OpenRouter costs stay visible.
 
 ### Route tasks across a model system
 
-`/route` lets you describe a model stack that blends local and frontier models:
+Bare `/route` opens a guided menu for previewing, selecting, inspecting, or
+configuring a route. The explicit subcommands remain available for scripts and
+experienced users. Albatross lets you describe a model stack that blends local
+and frontier models:
 separate orchestrators for low/medium/high planning, coders for
 low/medium/high implementation, play and production review models, a security
 review model, a compaction model that summarizes the transcript when context is
@@ -1094,7 +1100,7 @@ Full list with comments in [`.env.example`](.env.example).
 
 ### `agent.config.json`
 
-For project-level defaults, run `/setup`, use `/backend --default` /
+For project-level defaults, run `/setup`, use `/provider --default` /
 `/model --default`, or drop a JSON file at the repo root. Common shape:
 
 ```json
@@ -1107,6 +1113,7 @@ For project-level defaults, run `/setup`, use `/backend --default` /
   "maxSteps": 20,
   "display": {
     "toolDisplay": "grouped",
+    "theme": "cyan",
     "eventLog": { "enabled": true }
   },
   "scorecard": {
@@ -1236,8 +1243,10 @@ runtime.
   `total` seconds alongside the existing token and cost stats.
 - **Slash-command completion.** Type `/` and a menu of matching commands (with
   descriptions) appears beneath the prompt; the best match also shows as dim
-  ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**
-  accepts inline, **Esc** dismisses. It narrows live as you type.
+  ghost text. **↑/↓** select, **Enter** or **Tab** accepts (with a trailing
+  space), **→** accepts inline, **Esc** dismisses. It narrows live as you type.
+- **Terminal themes.** `/theme cyan|mono|green|amber` changes the palette
+  immediately and saves it under `display.theme` in `agent.config.json`.
 - **Update check.** Once a day, Albatross checks GitHub for a newer
   release and shows a one-line notice in the banner if there is one.
   Background, cached, opt-out with `ALBATROSS_NO_UPDATE_CHECK=true`.
@@ -1261,7 +1270,7 @@ runtime.
 
 ## Troubleshooting
 
-### `Backend not reachable: Connection error`
+### `Provider not reachable: Connection error`
 
 - **Ollama** — `brew services start ollama` or run `ollama serve`. Default port 11434.
 - **LM Studio** — open the app, go to Local Server, click Start. Default port 1234.
@@ -1270,15 +1279,15 @@ runtime.
 - **OpenRouter** — set `OPENROUTER_API_KEY` (or use `/auth set openrouter`).
 - **OpenAI** — set `OPENAI_API_KEY` (or use `/auth set openai`). Use `OPENAI_BASE_URL` for a compatible proxy.
 - **Anthropic** — set `ANTHROPIC_API_KEY` (or use `/auth set anthropic`). Use `ANTHROPIC_BASE_URL` for a compatible proxy.
-- **OpenAI Codex** — run `/login openai-codex`, then `/backend openai-codex`.
-- **Grok** — run `/login grok` (browser or device-code), then `/backend grok`.
+- **OpenAI Codex** — run `/login openai-codex`, then `/provider openai-codex`.
+- **Grok** — run `/login grok` (browser or device-code), then `/provider grok`.
 
 Run `/doctor --deep` for a fuller capability probe (streaming, usage chunks,
 native tool calls, inline JSON fallback). Reports land under `.sessions/doctor/`.
 
 ### First prompt is slow even with warmup
 
-The cache becomes stale when you change `/backend`, `/model`, or `/tools`.
+The cache becomes stale when you change `/provider`, `/model`, or `/tools`.
 The next prompt re-evaluates the new system prompt and tools. One-time per
 change.
 

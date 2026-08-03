@@ -170,12 +170,12 @@ pub async fn run_auto_loop(state: &mut AppState, opts: AutoOptions) -> Result<()
     }
     if should_refuse_cloud_handoff(state.backend.name, state.config.rubric.allow_cloud) {
         anyhow::bail!(
-            "/auto sends workspace context to the evaluator — run it on a local backend or set rubric.allowCloud"
+            "/auto sends workspace context to the evaluator — run it on a local provider or set rubric.allowCloud"
         );
     }
     if should_refuse_cloud_handoff(state.backend.name, opts.allow_cloud) {
         anyhow::bail!(
-            "/auto auto-resets, which drafts a handoff on the backend — run it on a local backend or pass --cloud"
+            "/auto auto-resets, which drafts a handoff through the provider — run it on a local provider or pass --cloud"
         );
     }
 

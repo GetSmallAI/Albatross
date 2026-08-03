@@ -350,7 +350,11 @@ fn migrate_workspace_scratch(workspace_root: &str) {
 
 async fn run_eval_cli(opts: CliEval) -> anyhow::Result<()> {
     let config = load_config();
-    crate::theme::init(config.display.color, config.display.ascii);
+    crate::theme::init(
+        config.display.color,
+        config.display.ascii,
+        config.display.theme,
+    );
     let code = crate::agent_eval::run_eval_cli(
         &config,
         &opts.fixture_id,
@@ -405,7 +409,11 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
         anyhow::bail!("one-shot prompt is empty");
     }
     let config = load_config();
-    crate::theme::init(config.display.color, config.display.ascii);
+    crate::theme::init(
+        config.display.color,
+        config.display.ascii,
+        config.display.theme,
+    );
     migrate_workspace_scratch(&config.workspace_root);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
@@ -716,10 +724,18 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     let setup_base = load_config();
-    crate::theme::init(setup_base.display.color, setup_base.display.ascii);
+    crate::theme::init(
+        setup_base.display.color,
+        setup_base.display.ascii,
+        setup_base.display.theme,
+    );
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
-    crate::theme::init(config.display.color, config.display.ascii);
+    crate::theme::init(
+        config.display.color,
+        config.display.ascii,
+        config.display.theme,
+    );
     migrate_workspace_scratch(&config.workspace_root);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
@@ -741,7 +757,7 @@ async fn main() -> anyhow::Result<()> {
             };
             println!("  {YELLOW}!{RESET} {DIM}{e}{RESET}");
             println!(
-                "  {DIM}Starting anyway so you can run {login_cmd}, or /backend to switch.{RESET}"
+                "  {DIM}Starting anyway so you can run {login_cmd}, or /provider to switch.{RESET}"
             );
         } else {
             eprintln!("{e}");
@@ -781,8 +797,8 @@ async fn main() -> anyhow::Result<()> {
         probe_backend(&http, &backend_desc).await
     };
     if let Err(hint) = probe {
-        println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {hint}{RESET}");
-        println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
+        println!("  {YELLOW}!{RESET} {DIM}Provider not reachable: {hint}{RESET}");
+        println!("  {DIM}You can still type /provider to switch, or fix and retry.{RESET}");
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
         let warmup_tool_names = select_tool_names(&config, "");
         let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);

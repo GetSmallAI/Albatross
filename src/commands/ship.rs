@@ -1173,7 +1173,7 @@ async fn draft_ship_commit_message(
             message: extract_markdown_section(&fallback, "Commit Message")
                 .unwrap_or_else(|| fallback_commit_message(context)),
             note: Some(
-                "cloud backend skipped for diff privacy; pass --cloud to draft with it".into(),
+                "cloud provider skipped for diff privacy; pass --cloud to draft with it".into(),
             ),
         };
     }

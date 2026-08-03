@@ -32,6 +32,7 @@ struct RouteSelectArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RouteInvocation {
+    Guide,
     Status,
     Template,
     History(usize),
@@ -61,6 +62,7 @@ pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
         return Ok(());
     };
     match invocation {
+        RouteInvocation::Guide => route_guide(state).await?,
         RouteInvocation::Status => {
             print_route_status(&state.config.model_system);
         }
@@ -91,9 +93,55 @@ fn route_usage() {
     );
 }
 
+async fn route_guide(state: &mut AppState) -> Result<()> {
+    println!(
+        "  {DIM}Routing picks a provider, model, and effort for a task. Preview is read-only; select also activates the result.{RESET}"
+    );
+    let options = vec![
+        "Preview a route for a task (no switch)".into(),
+        "Select and activate a route for a task".into(),
+        "Show the configured routing stack".into(),
+        "Explain the latest routing decision".into(),
+        "Show a starter routing configuration".into(),
+    ];
+    let Some(choice) = select_from_list("Route".into(), options, 0).await? else {
+        println!("  {DIM}Cancelled.{RESET}");
+        return Ok(());
+    };
+    match choice {
+        0 | 1 => {
+            let task = plain_read_line(format!(
+                "  {CYAN}❯{RESET} {DIM}Describe the task to route:{RESET} "
+            ))
+            .await?;
+            let task = task.trim();
+            if task.is_empty() {
+                println!("  {DIM}Cancelled — no task entered.{RESET}");
+                return Ok(());
+            }
+            select_route(
+                state,
+                RouteSelectArgs {
+                    apply: choice == 1,
+                    task: Some(task.to_string()),
+                },
+            )
+            .await?;
+        }
+        2 => print_route_status(&state.config.model_system),
+        3 => print_route_explanation(state, None)?,
+        4 => print_route_template(),
+        _ => unreachable!("route guide choice is bounded by its options"),
+    }
+    Ok(())
+}
+
 fn parse_route_args(args: &str) -> Option<RouteInvocation> {
     let trimmed = args.trim();
-    if trimmed.is_empty() || trimmed == "status" {
+    if trimmed.is_empty() || trimmed == "guide" || trimmed == "help" {
+        return Some(RouteInvocation::Guide);
+    }
+    if trimmed == "status" {
         return Some(RouteInvocation::Status);
     }
     if trimmed == "template" || trimmed == "config" {
@@ -1303,7 +1351,7 @@ async fn run_selector(
 ) -> Result<RouteDecision> {
     let backend_desc = state.config.backend_descriptor_for(selector.backend);
     if let Err(e) = validate(&backend_desc) {
-        return Err(anyhow!("selector backend is not ready: {e}"));
+        return Err(anyhow!("selector provider is not ready: {e}"));
     }
     let system = selector_system_prompt();
     let user = render_selector_prompt(&state.config.model_system, task, candidates);
@@ -1732,7 +1780,9 @@ mod tests {
 
     #[test]
     fn parses_route_commands() {
-        assert_eq!(parse_route_args(""), Some(RouteInvocation::Status));
+        assert_eq!(parse_route_args(""), Some(RouteInvocation::Guide));
+        assert_eq!(parse_route_args("guide"), Some(RouteInvocation::Guide));
+        assert_eq!(parse_route_args("status"), Some(RouteInvocation::Status));
         assert_eq!(
             parse_route_args("template"),
             Some(RouteInvocation::Template)

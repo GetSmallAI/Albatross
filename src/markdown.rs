@@ -418,7 +418,7 @@ mod tests {
 
     /// Feed `input` one char at a time (worst case) and collect all events.
     fn feed_char_by_char(input: &str) -> Vec<MdEvent> {
-        crate::theme::init(ColorMode::Always, false);
+        crate::theme::init(ColorMode::Always, false, crate::config::ThemePreset::Cyan);
         let mut md = MarkdownInline::new();
         let mut events = Vec::new();
         for ch in input.chars() {
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn bold_marker_split_across_chunks() {
-        crate::theme::init(ColorMode::Always, false);
+        crate::theme::init(ColorMode::Always, false, crate::config::ThemePreset::Cyan);
         let mut md = MarkdownInline::new();
         let mut events = md.feed("say **bo");
         events.extend(md.feed("ld** now"));
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn fence_backticks_split_across_chunks() {
-        crate::theme::init(ColorMode::Always, false);
+        crate::theme::init(ColorMode::Always, false, crate::config::ThemePreset::Cyan);
         let mut md = MarkdownInline::new();
         let mut events = md.feed("``");
         events.extend(md.feed("`py\ncode\n```\n"));
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn no_color_strips_markers_without_escapes() {
-        crate::theme::init(ColorMode::Never, false);
+        crate::theme::init(ColorMode::Never, false, crate::config::ThemePreset::Cyan);
         let mut md = MarkdownInline::new();
         let mut events = md.feed("**bold** and `code` and # not-heading");
         events.extend(md.finish());
@@ -560,6 +560,6 @@ mod tests {
         assert!(out.contains("bold"));
         assert!(out.contains("code"));
         assert!(!out.contains("**"));
-        crate::theme::init(ColorMode::Always, false);
+        crate::theme::init(ColorMode::Always, false, crate::config::ThemePreset::Cyan);
     }
 }

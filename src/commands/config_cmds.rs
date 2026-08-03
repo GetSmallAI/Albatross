@@ -1,4 +1,4 @@
-//! Config command group: /config, /backend, /model, /tools, /mode, /verbose, /trace,
+//! Config command group: /config, /provider (/backend alias), /theme, /model, /tools, /mode, /verbose, /trace,
 //! /reasoning, /auth, /login, /logout, /compare, /image.
 //! Split out of mod.rs; dispatch lives in mod.rs.
 
@@ -10,7 +10,7 @@ pub(super) fn cmd_config(state: &AppState) {
         state.config.mode.as_str()
     );
     println!(
-        "  {DIM}backend{RESET}          {CYAN}{}{RESET}",
+        "  {DIM}provider{RESET}         {CYAN}{}{RESET}",
         state.config.backend.as_str()
     );
     println!(
@@ -46,6 +46,10 @@ pub(super) fn cmd_config(state: &AppState) {
     println!(
         "  {DIM}showBanner{RESET}       {}",
         state.config.display.show_banner
+    );
+    println!(
+        "  {DIM}theme{RESET}            {}",
+        state.config.display.theme.as_str()
     );
     println!(
         "  {DIM}context{RESET}          maxMessages={:?} maxBytes={:?}",
@@ -115,6 +119,48 @@ pub(super) fn cmd_mode(args: &str, state: &mut AppState) {
         state.config.max_steps
     );
 }
+
+pub(super) fn cmd_theme(args: &str, state: &mut AppState) {
+    let value = args.trim();
+    if value.is_empty() || value == "status" {
+        println!(
+            "  {DIM}theme{RESET}     {CYAN}{}{RESET}",
+            state.config.display.theme.as_str()
+        );
+        println!("  {DIM}available{RESET} cyan, mono, green, amber");
+        println!("  {DIM}usage{RESET}     /theme <name> {DIM}(saved for this project){RESET}");
+        return;
+    }
+
+    let Some(preset) = crate::config::ThemePreset::parse(value) else {
+        println!(
+            "  {RED}✗{RESET} {DIM}unknown theme: {value} (use cyan, mono, green, or amber){RESET}"
+        );
+        return;
+    };
+
+    state.config.display.theme = preset;
+    crate::theme::init(
+        state.config.display.color,
+        state.config.display.ascii,
+        preset,
+    );
+    println!(
+        "  {GREEN}✓{RESET} {DIM}theme →{RESET} {CYAN}{}{RESET}",
+        preset.as_str()
+    );
+    if let Err(e) =
+        crate::config::persist_display_theme(Path::new(crate::config::AGENT_CONFIG_PATH), preset)
+    {
+        println!("  {RED}✗{RESET} {DIM}theme applied for this session but could not be saved: {e}{RESET}");
+    } else {
+        println!(
+            "  {DIM}· saved in {RESET}{CYAN}{}{RESET}",
+            crate::config::AGENT_CONFIG_PATH
+        );
+    }
+}
+
 pub(super) async fn cmd_auth(args: &str) -> Result<()> {
     use crate::auth::{auth_file_path, env_var_for, mask_key, AuthStore, KNOWN_PROVIDERS};
 
@@ -224,9 +270,9 @@ fn normalize_login_provider(raw: &str) -> Option<&'static str> {
 /// Resolve which OAuth provider `/login` / `/logout` should target.
 ///
 /// - Explicit args win (`/logout grok`, `/login codex`, …).
-/// - Bare commands use the **active OAuth backend** when the session is on
+/// - Bare commands use the **active OAuth provider** when the session is on
 ///   `grok` or `openai-codex`.
-/// - Bare commands with a non-OAuth backend (or no backend context, e.g.
+/// - Bare commands with a non-OAuth provider (or no provider context, e.g.
 ///   `/auth login`) require an explicit provider — no silent Codex default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginProviderResolve {
@@ -257,7 +303,7 @@ fn print_login_provider_error(action: &str, args: &str, resolve: LoginProviderRe
         LoginProviderResolve::NeedProvider => {
             println!(
                 "  {RED}✗{RESET} {DIM}usage: /{action} <openai-codex|grok> \
-                 (or switch to an OAuth backend first){RESET}"
+                 (or switch to an OAuth provider first){RESET}"
             );
         }
         LoginProviderResolve::Unknown => {
@@ -643,7 +689,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     // Pin the current backend as project default without switching.
     if rest.is_empty() && as_default {
         println!(
-            "  {GREEN}✓{RESET} {DIM}default backend →{RESET} {CYAN}{}{RESET} {DIM}(modelOverride cleared on disk){RESET}",
+            "  {GREEN}✓{RESET} {DIM}default provider →{RESET} {CYAN}{}{RESET} {DIM}(modelOverride cleared on disk){RESET}",
             state.config.backend.as_str()
         );
         persist_backend_as_default(state);
@@ -669,7 +715,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
             .iter()
             .position(|b| *b == state.config.backend)
             .unwrap_or(0);
-        match select_from_list("Backend".into(), options, default_idx).await? {
+        match select_from_list("Provider".into(), options, default_idx).await? {
             Some(idx) => backends.get(idx).copied(),
             None => None,
         }
@@ -717,12 +763,12 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     state.rebuild_client()?;
     state.resolve_model();
     println!(
-        "  {GREEN}✓{RESET} {DIM}backend →{RESET} {CYAN}{}{RESET} {DIM}· model →{RESET} {CYAN}{}{RESET}",
+        "  {GREEN}✓{RESET} {DIM}provider →{RESET} {CYAN}{}{RESET} {DIM}· model →{RESET} {CYAN}{}{RESET}",
         chosen.as_str(),
         state.model
     );
-    // Direct `/backend name --default` skips the confirm; the arrow picker
-    // offers to save the selected backend after applying it to this session.
+    // Direct `/provider name --default` skips the confirm; the arrow picker
+    // offers to save the selected provider after applying it to this session.
     if rest.is_empty() {
         maybe_persist_backend_default(state, false).await?;
     } else if as_default {
@@ -1171,7 +1217,7 @@ fn print_fusion_status(state: &AppState) {
     };
     println!("  {DIM}fusion{RESET}           {CYAN}{mode}{RESET}");
     println!(
-        "  {DIM}backend/model{RESET}    {} · {}",
+        "  {DIM}provider/model{RESET}   {} · {}",
         state.config.backend.as_str(),
         state.model
     );

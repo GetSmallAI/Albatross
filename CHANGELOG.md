@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added GPT-5.6 Sol, Terra, and Luna to the ChatGPT/Codex provider, with Sol as
+  the default and exact requested effort forwarded into transparent receipts.
+- Added persistent `cyan`, `mono`, `green`, and `amber` terminal themes through
+  `/theme`, plus `/provider` as the primary provider-switching command.
+- Added a guided task-first menu when `/route` is invoked without arguments.
+
+### Changed
+
+- Enter now accepts the highlighted slash-command completion; `/backend`
+  remains a compatibility alias for `/provider`.
+
+### Fixed
+
+- Fixed long interactive prompts leaving repeated text behind instead of
+  redrawing cleanly across wrapped terminal rows.
+
 ## [2.2.0] - 2026-08-02
 
 ### Added

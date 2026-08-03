@@ -1000,7 +1000,11 @@ mod tests {
         // never produce a visible line wider than `inner`, despite the ANSI
         // codes injected for bold/italic/code.
         use crate::markdown::{MarkdownInline, MdEvent};
-        crate::theme::init(crate::config::ColorMode::Always, false);
+        crate::theme::init(
+            crate::config::ColorMode::Always,
+            false,
+            crate::config::ThemePreset::Cyan,
+        );
         let input =
             "Here is **bold text** and `inline code` plus _emphasis_ that must wrap cleanly around.";
         let mut md = MarkdownInline::new();

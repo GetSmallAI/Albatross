@@ -7,7 +7,7 @@ the best model available on your machine.
 
 ## Before You Start
 
-You need Rust and at least one OpenAI-compatible local backend. Ollama is the
+You need Rust and at least one OpenAI-compatible local provider. Ollama is the
 fastest first path:
 
 ```bash
@@ -26,7 +26,7 @@ On first run, the setup wizard creates `agent.config.json`. For the quickest
 local setup, choose:
 
 ```text
-backend: ollama
+provider: ollama
 model override: blank
 approval policy: dangerous-only
 tool mode: auto
@@ -98,7 +98,7 @@ added.
 Useful commands:
 
 ```text
-/config       show the active backend, model, tools, workspace, and history
+/config       show the active provider, model, tools, workspace, and history
 /mode explore use a safer read/search preset while learning a repo
 /tools        show enabled tools and whether adaptive tool selection is on
 /context      show prompt budget, effective limit, headroom, and auto-guard status
@@ -151,6 +151,7 @@ Useful commands:
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions
 /fusion tool  attach Fusion deliberation to an OpenRouter coding model
+/route        open a guided preview/select/inspect menu
 /route select choose low/medium/high models for a task from your model stack
 /route explain show why the latest route was chosen and what actually ran
 /route spend aggregate routed cost by role and resolved model
@@ -209,7 +210,7 @@ Run:
 /doctor models
 ```
 
-If you have multiple backends running, probe them all:
+If you have multiple providers running, probe them all:
 
 ```text
 /doctor models refresh all
@@ -238,7 +239,7 @@ What Albatross is checking:
 - first-token latency
 - estimated output tokens per second
 
-By default, `/doctor recommend` prefers local backends. To let OpenRouter
+By default, `/doctor recommend` prefers local providers. To let OpenRouter
 compete with local models, use:
 
 ```text
@@ -246,7 +247,7 @@ compete with local models, use:
 ```
 
 Long coding sessions on small local models can fill the context window quickly.
-Albatross auto-compacts older turns on local backends when usage crosses
+Albatross auto-compacts older turns on local providers when usage crosses
 ~85% of the effective limit (run `/context` to see headroom). Compaction keeps
 complete tool-call rounds intact so the transcript stays valid for the next
 request. Use `/compact` manually if you want to shrink sooner. One-shot

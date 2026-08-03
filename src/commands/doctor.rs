@@ -35,7 +35,7 @@ async fn cmd_doctor_probe(args: &str, state: &AppState) -> Result<()> {
 
     println!("  {BOLD}Albatross doctor{RESET}");
     println!(
-        "  {DIM}backend{RESET} {} · {}",
+        "  {DIM}provider{RESET} {} · {}",
         state.config.backend.as_str(),
         state.backend.base_url
     );
@@ -343,7 +343,7 @@ fn doctor_warning(row: &DoctorCapabilityRow) -> Option<String> {
         );
     }
     if row.streaming.ok && !row.usage_chunks.ok {
-        return Some("streaming works, but usage chunks are not reported by this backend".into());
+        return Some("streaming works, but usage chunks are not reported by this provider".into());
     }
     None
 }
@@ -433,7 +433,7 @@ fn print_capability_table(rows: &[DoctorCapabilityRow]) {
     println!();
     println!(
         "  {BOLD}{:<11}{RESET} {:<7} {:<9} {:<6} {:<10} warning",
-        "backend", "models", "stream", "usage", "toolcalls"
+        "provider", "models", "stream", "usage", "toolcalls"
     );
     for row in rows {
         println!(
@@ -465,10 +465,10 @@ fn print_capability_table(rows: &[DoctorCapabilityRow]) {
 
 fn render_doctor_markdown(report: &DoctorCapabilityReport) -> String {
     let mut out = format!(
-        "# Albatross Doctor Report\n\nGenerated: `{}`\n\nActive backend: `{}`\n\n",
+        "# Albatross Doctor Report\n\nGenerated: `{}`\n\nActive provider: `{}`\n\n",
         report.generated_at, report.active_backend
     );
-    out.push_str("| Backend | Models | Streaming | Usage | Tool Calls | Warning |\n");
+    out.push_str("| Provider | Models | Streaming | Usage | Tool Calls | Warning |\n");
     out.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for row in &report.rows {
         out.push_str(&format!(
@@ -685,7 +685,7 @@ fn print_cached_capabilities(records: &[CapabilityRecord]) {
     println!();
     println!(
         "  {BOLD}{:<11}{RESET} {:<28} {:>5} {:<11} {:<10} benchmark",
-        "backend", "model", "score", "tools", "usage"
+        "provider", "model", "score", "tools", "usage"
     );
     for record in sorted_records(records) {
         println!(
@@ -766,7 +766,7 @@ async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
             );
         } else {
             println!(
-                "  {DIM}No usable cached model yet. Run /doctor autotune refresh all after starting your local backends.{RESET}"
+                "  {DIM}No usable cached model yet. Run /doctor autotune refresh all after starting your local providers.{RESET}"
             );
         }
         return Ok(());
@@ -775,7 +775,7 @@ async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
     let tool_selection = recommended_tool_selection(&recommendation);
     println!("  {BOLD}Autotune recommendation{RESET}");
     println!(
-        "  {DIM}backend{RESET} {} · {DIM}model{RESET} {}",
+        "  {DIM}provider{RESET} {} · {DIM}model{RESET} {}",
         recommendation.backend, recommendation.model
     );
     println!(
@@ -804,7 +804,7 @@ async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
 
     let Some(backend_name) = recommendation.backend_name() else {
         println!(
-            "  {RED}✗{RESET} {DIM}Cannot apply unknown backend: {}{RESET}",
+            "  {RED}✗{RESET} {DIM}Cannot apply unknown provider: {}{RESET}",
             recommendation.backend
         );
         return Ok(());
@@ -1042,7 +1042,7 @@ async fn cmd_recommend(args: &str, state: &mut AppState) -> Result<()> {
     let candidates = collect_recommendation_candidates(state, all, include_cloud).await?;
     let recommendations = recommend_models(&spec, candidates, include_cloud);
     if recommendations.is_empty() {
-        println!("  {DIM}No model candidates found. Start a local backend, then rerun /doctor recommend refresh.{RESET}");
+        println!("  {DIM}No model candidates found. Start a local provider, then rerun /doctor recommend refresh.{RESET}");
         return Ok(());
     }
 

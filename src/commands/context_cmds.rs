@@ -46,7 +46,7 @@ pub(super) async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
 
     if should_refuse_cloud_handoff(state.backend.name, args.allow_cloud) {
         println!(
-            "  {RED}✗{RESET} {DIM}/reset will not send the conversation to a cloud backend unless you pass --cloud.{RESET}"
+            "  {RED}✗{RESET} {DIM}/reset will not send the conversation to a cloud provider unless you pass --cloud.{RESET}"
         );
         return Ok(());
     }

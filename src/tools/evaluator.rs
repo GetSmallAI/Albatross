@@ -130,7 +130,7 @@ pub async fn run_evaluation(
 ) -> EvalVerdict {
     if should_refuse_cloud_handoff(backend.name, config.rubric.allow_cloud) {
         return EvalVerdict::failed(
-            "evaluator will not send workspace context to a cloud backend without rubric.allowCloud",
+            "evaluator will not send workspace context to a cloud provider without rubric.allowCloud",
         );
     }
     let rubric = load_rubric(
