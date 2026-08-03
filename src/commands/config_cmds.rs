@@ -270,6 +270,13 @@ fn print_login_provider_error(action: &str, args: &str, resolve: LoginProviderRe
     }
 }
 
+fn should_use_cli_credentials(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    )
+}
+
 pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result<()> {
     let resolve = resolve_login_provider(args, state.active_backend());
     let LoginProviderResolve::Provider(provider) = resolve else {
@@ -289,6 +296,37 @@ pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result
     };
     println!("  {BOLD}{title}{RESET}");
     println!("  {DIM}{note}{RESET}");
+    let cli_credentials = match provider {
+        "grok" if crate::xai_oauth::load_grok_cli_credentials().is_some() => {
+            Some(("Grok", "~/.grok/auth.json"))
+        }
+        "openai-codex" if crate::codex_oauth::load_codex_cli_credentials().is_some() => {
+            Some(("Codex", "~/.codex/auth.json"))
+        }
+        _ => None,
+    };
+    if let Some((cli_name, cli_path)) = cli_credentials {
+        println!("  Found existing {cli_name} CLI credentials in {cli_path}.");
+        let pick =
+            plain_read_line("  Use them instead of a new OAuth login? [Y/n]: ".into()).await?;
+        if should_use_cli_credentials(&pick) {
+            let path = match provider {
+                "grok" => crate::xai_oauth::import_grok_cli_credentials(state.http()).await?,
+                "openai-codex" => {
+                    crate::codex_oauth::import_codex_cli_credentials(state.http()).await?
+                }
+                _ => None,
+            };
+            if let Some(path) = path {
+                println!(
+                    "  {GREEN}✓{RESET} {DIM}logged in to {provider}; saved to {}{RESET}",
+                    path.display()
+                );
+                state.after_login()?;
+                return Ok(());
+            }
+        }
+    }
     println!("  {DIM}1) Browser login (default){RESET}");
     println!("  {DIM}2) Device-code login (headless/SSH){RESET}");
     let pick = plain_read_line(format!("  {DIM}Select [1]: {RESET}")).await?;
@@ -637,6 +675,15 @@ async fn maybe_persist_backend_default(state: &AppState, as_default: bool) -> Re
     Ok(())
 }
 
+fn activate_backend_for_login(state: &mut AppState, chosen: BackendName) {
+    state.config.backend = chosen;
+    state.config.model_override = None;
+    state.active_effort = None;
+    state.active_route = None;
+    state.backend = backend(chosen);
+    state.resolve_model();
+}
+
 pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
     let (rest, as_default) = crate::config::strip_default_flag(args);
 
@@ -678,26 +725,21 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         println!("  {DIM}Cancelled.{RESET}");
         return Ok(());
     };
-    if matches!(chosen, BackendName::OpenAiCodex)
+    let login_required = if matches!(chosen, BackendName::OpenAiCodex)
         && crate::auth::AuthStore::load()
             .get_oauth("openai-codex")
             .is_none()
     {
-        println!(
-            "  {RED}✗{RESET} {DIM}not logged in for openai-codex. Run /login openai-codex to sign in with ChatGPT.{RESET}"
-        );
-        return Ok(());
-    }
-    if matches!(chosen, BackendName::Grok)
+        Some("not logged in for openai-codex. Run /login to sign in with ChatGPT.")
+    } else if matches!(chosen, BackendName::Grok)
         && crate::auth::AuthStore::load()
             .get_oauth(crate::xai_oauth::PROVIDER)
             .is_none()
     {
-        println!(
-            "  {RED}✗{RESET} {DIM}not logged in for grok. Run /login grok to sign in with SuperGrok / X Premium+.{RESET}"
-        );
-        return Ok(());
-    }
+        Some("not logged in for grok. Run /login to sign in with SuperGrok / X Premium+.")
+    } else {
+        None
+    };
     if !chosen.is_local() && !chosen.is_oauth_login() && backend(chosen).api_key.is_empty() {
         let env_name = match chosen {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
@@ -710,17 +752,18 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         println!("  {RED}✗{RESET} {DIM}{env_name} not set in environment.{RESET}");
         return Ok(());
     }
-    state.config.backend = chosen;
-    state.config.model_override = None;
-    state.active_effort = None;
-    state.active_route = None;
-    state.rebuild_client()?;
-    state.resolve_model();
+    activate_backend_for_login(state, chosen);
+    if login_required.is_none() {
+        state.rebuild_client()?;
+    }
     println!(
         "  {GREEN}✓{RESET} {DIM}backend →{RESET} {CYAN}{}{RESET} {DIM}· model →{RESET} {CYAN}{}{RESET}",
         chosen.as_str(),
         state.model
     );
+    if let Some(message) = login_required {
+        println!("  {YELLOW}!{RESET} {DIM}{message}{RESET}");
+    }
     // Direct `/backend name --default` skips the confirm; the arrow picker
     // offers to save the selected backend after applying it to this session.
     if rest.is_empty() {
@@ -1420,6 +1463,25 @@ mod tests {
             resolve_login_provider("", None),
             LoginProviderResolve::NeedProvider
         );
+    }
+
+    #[test]
+    fn selecting_an_unauthenticated_oauth_backend_updates_login_target_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+
+        activate_backend_for_login(&mut state, BackendName::OpenAiCodex);
+
+        assert_eq!(state.config.backend, BackendName::OpenAiCodex);
+        assert_eq!(state.backend.name, BackendName::OpenAiCodex);
+        assert_eq!(state.model, "gpt-5.5");
+    }
+
+    #[test]
+    fn cli_import_prompt_defaults_to_import_and_allows_declining() {
+        assert!(should_use_cli_credentials(""));
+        assert!(should_use_cli_credentials("YES"));
+        assert!(!should_use_cli_credentials("n"));
     }
 
     #[test]

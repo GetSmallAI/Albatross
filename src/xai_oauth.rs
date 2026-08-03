@@ -706,45 +706,35 @@ pub fn load_grok_cli_credentials() -> Option<OAuthCredential> {
     try_entry(&data)
 }
 
-async fn maybe_import_grok_cli(client: &reqwest::Client) -> Result<Option<OAuthCredential>> {
+pub async fn import_grok_cli_credentials(client: &reqwest::Client) -> Result<Option<PathBuf>> {
     let Some(existing) = load_grok_cli_credentials() else {
         return Ok(None);
     };
-    println!("  Found existing Grok CLI credentials in ~/.grok/auth.json.");
-    let pick = plain_read_line("  Use them instead of a new OAuth login? [Y/n]: ".into()).await?;
-    let trimmed = pick.trim().to_lowercase();
-    if trimmed.is_empty() || trimmed == "y" || trimmed == "yes" {
-        if existing.expires <= now_secs() + 60 {
-            if existing.refresh.is_empty() {
-                println!("  Stored Grok CLI token is expired and has no refresh token.");
+    let credential = if existing.expires <= now_secs() + 60 {
+        if existing.refresh.is_empty() {
+            println!("  Stored Grok CLI token is expired and has no refresh token.");
+            return Ok(None);
+        }
+        match refresh_oauth(
+            client,
+            &existing.refresh,
+            Some(&format!("{ISSUER}/oauth2/token")),
+        )
+        .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(e) => {
+                println!("  Could not refresh Grok CLI credentials ({e}); starting fresh login.");
                 return Ok(None);
             }
-            match refresh_oauth(
-                client,
-                &existing.refresh,
-                Some(&format!("{ISSUER}/oauth2/token")),
-            )
-            .await
-            {
-                Ok(refreshed) => return Ok(Some(refreshed)),
-                Err(e) => {
-                    println!(
-                        "  Could not refresh Grok CLI credentials ({e}); starting fresh login."
-                    );
-                    return Ok(None);
-                }
-            }
         }
-        return Ok(Some(existing));
-    }
-    Ok(None)
+    } else {
+        existing
+    };
+    save_oauth(credential).map(Some)
 }
 
 pub async fn login_browser(client: &reqwest::Client) -> Result<OAuthCredential> {
-    if let Some(imported) = maybe_import_grok_cli(client).await? {
-        return Ok(imported);
-    }
-
     let discovery = discover(client).await?;
     let (verifier, challenge) = pkce_pair();
     let state = random_hex(16);
@@ -810,10 +800,6 @@ struct DeviceStartResponse {
 }
 
 pub async fn login_device_code(client: &reqwest::Client) -> Result<OAuthCredential> {
-    if let Some(imported) = maybe_import_grok_cli(client).await? {
-        return Ok(imported);
-    }
-
     let discovery = discover(client).await?;
     let body = form_urlencoded(&[("client_id", CLIENT_ID), ("scope", SCOPE)]);
     let resp = client
