@@ -1,4 +1,6 @@
-<h1 align="center">Albatross</h1>
+<p align="center">
+  <img alt="Albatross" src="docs/assets/demo/albatross-wordmark.svg" width="720">
+</p>
 
 <p align="center">
   <strong>A small, terminal-first coding harness. Bring your own model, your own key, or your own MCP server.</strong>
