@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="616" height="122" viewBox="0 0 616 122" role="img" aria-label="Albatross">
+  <title>Albatross</title>
+  <style>
+    text {
+      fill: #1f2328;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: pre;
+    }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+    }
+  </style>
+  <text x="8" y="23">   █████╗ ██╗     ██████╗  █████╗ ████████╗██████╗  ██████╗ ███████╗███████╗</text>
+  <text x="8" y="40">  ██╔══██╗██║     ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗██╔═══██╗██╔════╝██╔════╝</text>
+  <text x="8" y="57">  ███████║██║     ██████╔╝███████║   ██║   ██████╔╝██║   ██║███████╗███████╗</text>
+  <text x="8" y="74">  ██╔══██║██║     ██╔══██╗██╔══██║   ██║   ██╔══██╗██║   ██║╚════██║╚════██║</text>
+  <text x="8" y="91">  ██║  ██║███████╗██████╔╝██║  ██║   ██║   ██║  ██║╚██████╔╝███████║███████║</text>
+  <text x="8" y="108">  ╚═╝  ╚═╝╚══════╝╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝</text>
+</svg>
