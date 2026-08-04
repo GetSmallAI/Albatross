@@ -44,6 +44,12 @@ pub enum AgentEvent {
         args: Value,
         depth: u32,
     },
+    /// The tool passed all approval and hook gates and is about to execute.
+    /// This is deliberately separate from `ToolCall`: interactive approval
+    /// owns the terminal between the two events.
+    ToolExecutionStarted {
+        name: String,
+    },
     ToolResult {
         name: String,
         call_id: String,
@@ -772,6 +778,18 @@ where
             tool_calls: tcs.clone(),
             provider_content,
         });
+
+        // `ToolCall` is announced before approval so the user can inspect the
+        // request. Only emit the execution event after every approval gate has
+        // resolved; the terminal can then safely show an animated progress
+        // indicator without corrupting the approval input line.
+        for (tc, entry) in tcs.iter().zip(pending.iter()) {
+            if matches!(entry, Pending::Run { .. }) {
+                on_event(AgentEvent::ToolExecutionStarted {
+                    name: tc.function.name.clone(),
+                });
+            }
+        }
 
         fn value_to_string(result: &Value) -> String {
             if let Some(s) = result.as_str() {
