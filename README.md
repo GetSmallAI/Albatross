@@ -80,6 +80,17 @@ few that aren't usual:
 - **Approval gates you can live with.** Every mutating call shows you the
   diff first, with `allow once / allow session / always allow` caching.
 
+### How it compares
+
+| Harness | Best for | Shines at | Less ideal for |
+|---|---|---|---|
+| **Albatross** | Flexible model choice | Hybrid workflows, routing tasks to the right model, safe end-to-end coding | A minimal “just chat with a model” setup |
+| **[Little Coder](https://github.com/itayinbarr/little-coder)** | Small local coding models | Extracting reliable work from constrained models | Broad cloud-model workflows |
+| **[Pi](https://github.com/earendil-works/pi)** | Building a custom harness | Minimalism and extension-based customization | Rich features out of the box |
+| **[SmallCode](https://github.com/Doorman11991/smallcode)** | Small local models | Compact tools and tight context budgets | Mature, proven ecosystem needs |
+| **[OpenCode](https://github.com/anomalyco/opencode)** | General-purpose coding agent | Provider choice, MCP, and multi-agent work | Deep specialization for small local models |
+| **[OpenHarness](https://github.com/HKUDS/OpenHarness)** | Persistent agent sessions | Long-running, multi-agent sessions | Focused day-to-day coding workflows |
+
 ---
 
 ## Install
